@@ -1,0 +1,83 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+// generator client {
+//   provider = "prisma-client-js"
+//   output   = "../generated/prisma"
+// }
+
+// datasource db {
+//   provider = "postgresql"
+//   url      = env("DATABASE_URL")
+// }
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    String  @id @default(cuid())
+  name  String
+  email String  @unique
+  image String
+  hostedStreams Stream[] @relation("StreamHost")
+  listeningTo   Stream[] @relation("StreamListeners")
+  songs   Song[] @relation("UserSongs")
+}
+
+model Playlist {
+  id        String   @id @default(cuid())
+  title     String
+  songs     Song[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Listeners {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  image     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Song {
+  id        String   @id @default(cuid())
+  title     String
+  artist    String
+  url       String
+  thumbnail String
+  votes     Int
+  duration  Int
+  addedAt   DateTime
+  addedBy   User     @relation("UserSongs", fields: [addedById], references: [id])
+  addedById String
+  stream    Stream?  @relation("CurrentSong")
+  streamId  String?  @unique
+  queuedIn  Stream[] @relation("Queue")
+  Playlist Playlist[]
+}
+
+model Stream {
+  id          String   @id @default(cuid())
+  title       String
+  isActive    Boolean
+  listeners   Int
+  createdAt   DateTime @default(now())
+  host        User     @relation("StreamHost", fields: [hostId], references: [id])
+  hostId      String
+  listners    User[]   @relation("StreamListeners")
+  currentSong Song?    @relation("CurrentSong", fields: [currentSongId], references: [id])
+  currentSongId String? @unique 
+  queue       Song[]   @relation("Queue")
+}
