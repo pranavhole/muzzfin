@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Audio Client</title>
+</head>
+<body>
+  <h1>YouTube Audio WebRTC Client</h1>
+  <input id="url" placeholder="YouTube URL" style="width:300px;">
+  <input id="streamId" placeholder="Stream ID" style="width:150px;">
+  <button id="startBtn">Start Stream</button>
+  <button id="stopBtn">Stop Stream</button>
+  <br><br>
+  <audio id="audio" autoplay controls></audio>
+
+  <script src="http://localhost:3003/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io("http://localhost:3003", { transports: ["websocket"] });
+    let pc = null;
+    const audioEl = document.getElementById("audio");
+
+    document.getElementById("startBtn").onclick = async () => {
+      const youtubeUrl = document.getElementById("url").value.trim();
+      const streamId = document.getElementById("streamId").value.trim();
+      if (!youtubeUrl || !streamId) return alert("Enter URL and Stream ID");
+
+      pc = new RTCPeerConnection();
+
+      // Properly attach incoming track to a MediaStream
+      pc.ontrack = (event) => {
+        console.log("Received track:", event.track);
+        const ms = new MediaStream();
+        ms.addTrack(event.track);
+        audioEl.srcObject = ms;
+        audioEl.muted = false;
+        audioEl.play().catch(err => console.error("Autoplay failed:", err));
+      };
+
+      pc.onicecandidate = (e) => {
+        // For local testing, candidates may not be needed
+        if (e.candidate) console.log("Local ICE candidate:", e.candidate);
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Send offer to server
+      socket.emit("offer", { streamId, youtubeUrl, sdp: offer.sdp });
+
+      // Receive SDP answer from server
+      socket.on("answer", async ({ sdp }) => {
+        console.log("Received SDP answer");
+        await pc.setRemoteDescription({ type: "answer", sdp });
+        console.log("Connected to stream:", streamId);
+      });
+    };
+
+    document.getElementById("stopBtn").onclick = () => {
+      if (!pc) return;
+      pc.close();
+      pc = null;
+      audioEl.srcObject = null;
+    };
+  </script>
+</body>
+</html>

@@ -13,7 +13,9 @@ export type Song = {
   url: string;
   thumbnail?: string;
   addedBy: string;
-  votes: number;
+  _count?: {
+    votedBy: number;
+  };
   duration: number;
   addedAt: string;
 };

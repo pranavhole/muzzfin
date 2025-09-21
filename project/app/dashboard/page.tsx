@@ -1,10 +1,9 @@
 "use client";
-
+import axios from "axios";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { Stream } from "@/lib/types";
-import { createStream, getStreams } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,9 +31,14 @@ export default function DashboardPage() {
   const fetchStreams = async () => {
     setIsLoading(true);
     try {
-      const allStreams = await getStreams();
-      // Filter streams created by the current user
-      const userStreams = user ? allStreams.filter(stream => stream.hostId === user.id) : [];
+      console.log("Fetching streams for user:", user);
+      const response = await axios.get(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/streams`,{params: {
+            mode: "host",
+            hostId: user?.id,
+            userId: "",
+          },});
+      const userStreams: Stream[] = response.data;
+      console.log("Fetched streams:", userStreams);
       setStreams(userStreams);
     } catch (error) {
       console.error("Error fetching streams:", error);
@@ -55,23 +59,22 @@ export default function DashboardPage() {
         description: "Please enter a stream title",
         variant: "destructive",
       });
-      return;
     }
     
     setIsCreating(true);
     try {
       if (!user) throw new Error("User not authenticated");
-      
-      const newStream = await createStream(newStreamTitle.trim(), user.id);
+
+      const newStream = await axios.post(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/streams`, {
+        title: newStreamTitle,
+        userId: user.id,
+      }).then(res => res.data);
       setStreams([newStream, ...streams]);
       setNewStreamTitle("");
-      
       toast({
         title: "Success",
         description: "Stream created successfully",
       });
-      
-      // Navigate to the new stream
       router.push(`/stream/${newStream.id}`);
     } catch (error) {
       console.error("Error creating stream:", error);
@@ -95,6 +98,7 @@ export default function DashboardPage() {
 
   return (
     <div className="container py-10">
+      <input type="number"></input>
       <div className="flex flex-col gap-8">
         <div className="flex flex-col gap-2">
           <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>

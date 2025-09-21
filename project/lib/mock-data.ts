@@ -173,7 +173,8 @@ export function addSongToStream(streamId: string, songUrl: string, userId: strin
   });
 }
 
-export function voteSong(streamId: string, songId: string): Promise<void> {
+export  function  voteSong(streamId: string, songId: string): Promise<void> {
+  
   return new Promise((resolve) => {
     setTimeout(() => {
       const stream = mockStreams.find((s) => s.id === streamId);

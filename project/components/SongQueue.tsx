@@ -16,7 +16,6 @@ interface SongQueueProps {
 
 export function SongQueue({ songs, onVote, onRemove, className }: SongQueueProps) {
   const { user } = useAuth();
-  
   if (songs.length === 0) {
     return (
       <div className={cn("p-4 border rounded-lg bg-card", className)}>
@@ -45,11 +44,11 @@ export function SongQueue({ songs, onVote, onRemove, className }: SongQueueProps
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 rounded-full"
-                  onClick={() => onVote(song.id)}
+                  onClick={(e:React.FormEvent) => {e.preventDefault; onVote(song.id)}}
                 >
                   <ChevronUp className="h-4 w-4" />
                 </Button>
-                <span className="text-xs font-medium">{song.votes}</span>
+                <span className="text-xs font-medium">{song?._count?.votedBy}</span>
               </div>
               
               <div className="w-10 h-10 rounded-md overflow-hidden bg-secondary flex-shrink-0">

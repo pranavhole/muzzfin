@@ -1,4 +1,5 @@
 import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 import { 
   Music, 
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 
 export default function Home() {
+  
   return (
     <div className="flex flex-col min-h-screen">
       {/* Hero section */}

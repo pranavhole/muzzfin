@@ -36,19 +36,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const updateLastSeen = async () => {
       try {
-        await axios.post(`${process.env.SERVER_URL}/api/user/lastseen`);
+        await axios.post(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/users/lastSeen`,{ id: user?.id, lastSeen: new Date().toISOString() });
       } catch (error) {
         console.error("Failed to update lastSeen:", error);
       }
     };
 
-    // Initial update immediately after login or page load
     updateLastSeen();
 
-    // Set interval to update every 30 seconds
     const intervalId = setInterval(updateLastSeen, 30000);
 
-    // Cleanup the interval on logout or component unmount
     return () => clearInterval(intervalId);
   }, [isAuthenticated]);
 

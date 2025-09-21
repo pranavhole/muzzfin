@@ -1,227 +1,229 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Play, Pause, SkipForward, Volume2, VolumeX } from "lucide-react";
-import { Song } from "@/lib/types";
-import { Slider } from "@/components/ui/slider";
+import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Slider } from "@/components/ui/slider";
+import { Play, Pause, SkipForward } from "lucide-react";
+import Image from "next/image";
+import axios from "axios";
 
 interface MusicPlayerProps {
-  currentSong: Song | null;
-  onEnded?: () => void;
-  className?: string;
-  isHost?: boolean;
+  stream: any;
+  isPlaying?: boolean;
+  currentTime?: number;
+  onPlay?: () => void;
+  onPause?: () => void;
+  onSkip?: () => Promise<any> | any;
+  onSeek?: (time: number) => void;
 }
 
-export function MusicPlayer({ 
-  currentSong, 
-  onEnded, 
-  className,
-  isHost = false 
+export default function MusicPlayer({
+  stream,
+  isPlaying = false,
+  currentTime = 0,
+  onPlay,
+  onPause,
+  onSkip,
+  onSeek,
 }: MusicPlayerProps) {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(70);
-  const [isMuted, setIsMuted] = useState(false);
+  const currentSong = stream?.currentSong || null;
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [duration, setDuration] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isReady, setIsReady] = useState(false);
+  const [id, setId] = useState<string | null>(null);
 
+  const lastSeekEmit = useRef<number>(0);
+  const seekTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  // reset when song changes
   useEffect(() => {
-    // Reset state when song changes
-    if (currentSong) {
-      setCurrentTime(0);
-      if (isHost) {
-        setIsPlaying(true);
-      }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
     }
-  }, [currentSong, isHost]);
+    setIsLoading(true);
+    setIsReady(false);
+    setId(null);
+    setDuration(0);
+  }, [stream]);
 
+  // poll until backend marks song ready
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    if (!currentSong) return;
 
-    const updateTime = () => setCurrentTime(audio.currentTime);
-    const handleDurationChange = () => setDuration(audio.duration);
-    const handleEnded = () => {
-      setIsPlaying(false);
-      if (onEnded) onEnded();
+    let active = true;
+    let pollTimeout: NodeJS.Timeout;
+
+    const poll = async () => {
+      try {
+        const res = await axios.get(
+          `http://localhost:5000/api/v1/play/ready/${currentSong.id}`
+        );
+        if (!active) return;
+
+        if (res.data.ready) {
+          setIsReady(true);
+          setIsLoading(false);
+          setId(res.data.id);
+        } else {
+          pollTimeout = setTimeout(poll, 2000);
+        }
+      } catch (err) {
+        console.error("Polling error:", err);
+        if (active) {
+          pollTimeout = setTimeout(poll, 4000);
+        }
+      }
     };
 
-    audio.addEventListener("timeupdate", updateTime);
-    audio.addEventListener("durationchange", handleDurationChange);
-    audio.addEventListener("ended", handleEnded);
+    poll();
 
     return () => {
-      audio.removeEventListener("timeupdate", updateTime);
-      audio.removeEventListener("durationchange", handleDurationChange);
-      audio.removeEventListener("ended", handleEnded);
+      active = false;
+      clearTimeout(pollTimeout);
     };
-  }, [onEnded]);
+  }, [currentSong]);
 
+  const audioUrl =
+    isReady && currentSong
+      ? `http://localhost:5000/api/v1/play/${id}/playlist.m3u8`
+      : null;
+
+  // setup HLS
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    if (!audioUrl || !audioRef.current) return;
 
-    if (isPlaying) {
-      audio.play().catch((error) => {
-        console.error("Error playing audio:", error);
-        setIsPlaying(false);
+    const audio = audioRef.current;
+    let hls: Hls | null = null;
+
+    const handleLoadedMetadata = () => {
+      const dur = audio.duration;
+      setDuration(isFinite(dur) && dur > 0 ? dur : currentSong?.duration || 0);
+    };
+
+    const handleEnded = async () => {
+      if (onSkip) await onSkip();
+    };
+
+    const handleTimeUpdate = () => {
+      const now = Date.now();
+      if (now - lastSeekEmit.current >= 3000) {
+        lastSeekEmit.current = now;
+        onSeek?.(audio.currentTime);
+      }
+    };
+
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+
+    if (Hls.isSupported()) {
+      hls = new Hls();
+      hls.loadSource(audioUrl);
+      hls.attachMedia(audio);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        if (data.levels?.[0]?.details) {
+          setDuration(
+            data.levels[0].details.totalduration || currentSong?.duration || 0
+          );
+        }
       });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        console.error("[HLS Error]", data);
+      });
+    } else if (audio.canPlayType("application/vnd.apple.mpegurl")) {
+      audio.src = audioUrl;
+    }
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+      if (hls) hls.destroy();
+    };
+  }, [audioUrl, currentSong]);
+
+  // sync play/pause
+  useEffect(() => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current
+        .play()
+        .catch((err) => console.warn("[Autoplay blocked]", err));
     } else {
-      audio.pause();
+      audioRef.current.pause();
     }
   }, [isPlaying]);
 
+  // sync seek
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    audio.volume = volume / 100;
-    audio.muted = isMuted;
-  }, [volume, isMuted]);
-
-  const togglePlayPause = () => {
-    setIsPlaying(!isPlaying);
-  };
-
-  const toggleMute = () => {
-    setIsMuted(!isMuted);
-  };
-
-  const handleTimeChange = (value: number[]) => {
-    const time = value[0];
-    setCurrentTime(time);
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
+    if (!audioRef.current) return;
+    if (Math.abs(audioRef.current.currentTime - currentTime) > 1) {
+      audioRef.current.currentTime = currentTime;
     }
+  }, [currentTime]);
+
+  // handle manual slider seek with debounce
+  const handleSeek = (value: number[]) => {
+    const time = value[0];
+    if (audioRef.current) audioRef.current.currentTime = time;
+
+    if (seekTimeout.current) clearTimeout(seekTimeout.current);
+    seekTimeout.current = setTimeout(() => {
+      onSeek?.(time);
+    }, 500);
   };
 
-  const handleVolumeChange = (value: number[]) => {
-    const newVolume = value[0];
-    setVolume(newVolume);
-    setIsMuted(newVolume === 0);
+  const handlePlay = () => {
+    if (audioRef.current) audioRef.current.play().catch(console.error);
+    onPlay?.();
   };
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
-
-  if (!currentSong) {
-    return (
-      <div className={cn("w-full bg-card rounded-lg p-4", className)}>
-        <div className="flex flex-col items-center justify-center h-32">
-          <p className="text-muted-foreground">No song playing</p>
-        </div>
-      </div>
-    );
-  }
+  if (isLoading) return <div>Loading player...</div>;
+  if (!currentSong) return <div>No song selected</div>;
 
   return (
-    <div className={cn("w-full bg-card rounded-lg p-4 shadow-sm", className)}>
-      <audio
-        ref={audioRef}
-        src={currentSong.url}
-        preload="metadata"
-        className="hidden"
-      />
-      
-      <div className="flex items-center gap-4">
-        <div className="w-12 h-12 rounded-md overflow-hidden bg-secondary flex-shrink-0">
-          {currentSong.thumbnail ? (
-            <img 
-              src={currentSong.thumbnail} 
-              alt={currentSong.title} 
-              className="w-full h-full object-cover" 
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-primary/10">
-              <span className="text-xl font-bold text-primary/50">
-                {currentSong.title.charAt(0)}
-              </span>
-            </div>
-          )}
-        </div>
-        
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium truncate">{currentSong.title}</p>
-          <p className="text-xs text-muted-foreground truncate">{currentSong.artist}</p>
-        </div>
-        
-        <div className="flex-shrink-0 flex items-center gap-2">
+    <div className="flex items-center gap-4 p-4 border rounded-2xl bg-card shadow-sm">
+      {currentSong.thumbnail && (
+        <Image
+          src={currentSong.thumbnail}
+          alt="Thumbnail"
+          className="w-16 h-16 rounded-xl object-cover"
+          width={64}
+          height={64}
+          unoptimized
+        />
+      )}
+      <div className="flex-1">
+        <h4 className="font-semibold">{currentSong.title}</h4>
+        <Slider
+          value={[currentTime]}
+          max={duration}
+          step={1}
+          className="mt-2"
+          onValueChange={handleSeek}
+        />
+        <div className="flex items-center gap-2 mt-2">
           <Button
-            variant="ghost"
             size="icon"
-            className="h-9 w-9 rounded-full"
-            onClick={toggleMute}
-          >
-            {isMuted ? (
-              <VolumeX className="h-4 w-4" />
-            ) : (
-              <Volume2 className="h-4 w-4" />
-            )}
-          </Button>
-          
-          <div className="hidden sm:block w-24">
-            <Slider
-              value={[volume]}
-              min={0}
-              max={100}
-              step={1}
-              onValueChange={handleVolumeChange}
-              className="w-full"
-            />
-          </div>
-        </div>
-      </div>
-      
-      <div className="mt-4">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-xs text-muted-foreground w-8">
-            {formatTime(currentTime)}
-          </span>
-          <Slider
-            value={[currentTime]}
-            min={0}
-            max={duration || 100}
-            step={0.01}
-            onValueChange={handleTimeChange}
-            className="flex-1"
-          />
-          <span className="text-xs text-muted-foreground w-8">
-            {formatTime(duration)}
-          </span>
-        </div>
-      </div>
-      
-      <div className="mt-2 flex items-center justify-center gap-2">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-10 w-10 rounded-full"
-          onClick={togglePlayPause}
-        >
-          {isPlaying ? (
-            <Pause className="h-5 w-5" />
-          ) : (
-            <Play className="h-5 w-5" />
-          )}
-        </Button>
-        
-        {isHost && (
-          <Button
             variant="outline"
-            size="icon"
-            className="h-10 w-10 rounded-full"
-            onClick={onEnded}
-            disabled={!currentSong}
+            onClick={isPlaying ? onPause : handlePlay}
           >
-            <SkipForward className="h-5 w-5" />
+            {isPlaying ? <Pause /> : <Play />}
           </Button>
-        )}
+          <Button size="icon" variant="outline" onClick={onSkip}>
+            <SkipForward />
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {Math.floor(currentTime)}s / {Math.floor(duration)}s
+          </span>
+        </div>
       </div>
+      <audio ref={audioRef} controls={false} />
     </div>
   );
 }

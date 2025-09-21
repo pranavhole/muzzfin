@@ -1,0 +1,27 @@
+# Node.js
+node_modules/
+npm-debug.log*
+
+
+
+.DS_Store
+
+
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+*.log
+
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+
+dist/
+build/
+out/
+*.egg-info/
+

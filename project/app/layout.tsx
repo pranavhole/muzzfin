@@ -23,13 +23,13 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
-      <Providers>
+      <Providers >
         <ThemeProvider>
           <AuthProvider>
             
             <div className="min-h-screen flex flex-col">
               <Navbar />
-              <main className="flex-grow">
+              <main className="flex-grow ml-4 mr-4">
                 {children}
               </main>
               <Footer />
@@ -38,7 +38,7 @@ export default function RootLayout({
          
           </AuthProvider>
         </ThemeProvider>
-        </Providers>
+      </Providers>
       </body>
     </html>
   );

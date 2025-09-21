@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Radio, Loader2, Search } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import axios from "axios";
+import { any } from "zod";
 
 export default function StreamsPage() {
   const [streams, setStreams] = useState<Stream[]>([]);
@@ -35,9 +37,9 @@ export default function StreamsPage() {
   const fetchStreams = async () => {
     setIsLoading(true);
     try {
-      const allStreams = await getStreams();
+      const allStreams = await axios.get("http://localhost:5000/api/v1/streams",{params: {mode:"all"}}).then(res => res.data);
       // Filter to only show active streams
-      const activeStreams = allStreams.filter(stream => stream.isActive);
+      const activeStreams = allStreams.filter((stream:any) => stream.isActive);
       setStreams(activeStreams);
       setFilteredStreams(activeStreams);
     } catch (error) {

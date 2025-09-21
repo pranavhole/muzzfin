@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Song" ADD COLUMN     "playedUpto" INTEGER NOT NULL DEFAULT 0;

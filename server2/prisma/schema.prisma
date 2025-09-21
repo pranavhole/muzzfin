@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String       @id @default(cuid())
+  name           String
+  email          String       @unique
+  image          String
+  hostedStreams  Stream[]     @relation("StreamHost")
+  listeningTo    Stream[]     @relation("StreamListeners")
+  songs          Song[]       @relation("UserSongs")
+  votedSongs     Song[]       @relation("SongVotes")
+  lastSeen       DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  followers      Followers[]  @relation("UserFollowers")
+  following      Followers[]  @relation("UserFollowing")
+}
+
+model Playlist {
+  id        String   @id @default(cuid())
+  title     String
+  songs     Song[]   @relation("PlaylistSongs")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Followers {
+  id         String   @id @default(cuid())
+  name       String
+  email      String   @unique
+  image      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  followers  User[]   @relation("UserFollowers")
+  following  User[]   @relation("UserFollowing")
+}
+model Song {
+  id          String     @id @default(cuid())
+  title       String
+  artist      String
+  url         String     
+  thumbnail   String
+  duration    Int
+  addedAt     DateTime
+  addedById   String
+  addedBy     User       @relation("UserSongs", fields: [addedById], references: [id])
+  votedBy     User[]     @relation("SongVotes")
+  playedUpto  Int        @default(0)
+  streamId    String?    
+  stream      Stream?    @relation("CurrentSong")
+  songId      String?
+  downloadedSongId String?
+  downloadedSong   DownloadedSong? @relation(fields: [downloadedSongId], references: [id])
+  songPath    String?
+  createdAt   DateTime   @default(now())
+  hasSong     Boolean    @default(false)
+  queuedIn    Stream[]   @relation("Queue")
+  playlists   Playlist[] @relation("PlaylistSongs")
+}
+
+model DownloadedSong {
+  id        String   @id @default(cuid())
+  url       String   @unique
+  path      String?
+  songs     Song[]
+  isReady   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+
+model Stream {
+  id             String   @id @default(cuid())
+  title          String
+  isActive       Boolean  @default(false)
+  listenersCount Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  hostId         String
+  host           User     @relation("StreamHost", fields: [hostId], references: [id])
+
+  listeners      User[]   @relation("StreamListeners")
+
+  currentSongId  String?  @unique
+  currentSong    Song?    @relation("CurrentSong", fields: [currentSongId], references: [id]) 
+  queue          Song[]   @relation("Queue")
+}
