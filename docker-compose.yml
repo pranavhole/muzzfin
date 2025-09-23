@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: ./project
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"           # map to host port 3000 (adjust as needed)
+    depends_on:
+      - server2
+      - stream
+
+  server2:
+    build:
+      context: ./server2
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"         # adjust to your backend port
+
+  stream:
+    build:
+      context: ./stream
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"         # adjust to your stream app port
