@@ -1,5 +1,5 @@
 # Frontend
-cd frontend
+cd project
 flyctl launch --name my-frontend --region bom
 
 # Backend 1
