@@ -6,7 +6,12 @@ services:
       context: ./project
       dockerfile: Dockerfile
     ports:
-      - "3000:80"           # map to host port 3000 (adjust as needed)
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=your_secret_here
+      - SERVER_URL=http://server2:5000
     depends_on:
       - server2
       - stream
@@ -16,11 +21,15 @@ services:
       context: ./server2
       dockerfile: Dockerfile
     ports:
-      - "5000:5000"         # adjust to your backend port
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
 
   stream:
     build:
       context: ./stream
       dockerfile: Dockerfile
     ports:
-      - "4000:4000"         # adjust to your stream app port
+      - "4000:4000"
+    environment:
+      - NODE_ENV=production

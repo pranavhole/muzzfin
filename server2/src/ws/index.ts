@@ -1,14 +1,22 @@
-// socketServer.ts
 import { Server as SocketIOServer, Socket } from "socket.io";
 import { PrismaClient } from "@prisma/client";
 import { getYouTubeMetadata, getYouTubeVideoId } from "./handlers/addSong";
 import { voteSongHandler } from "./handlers/voteSong";
 import { removeSongHandler } from "./handlers/removeSong";
 import { skipSongHandler } from "./handlers/skipSong";
-import axios from "axios";
+import { createClient } from "redis";
+
 const prisma = new PrismaClient();
 
-// Keep track of clients per stream
+
+const redisPub = createClient();
+const redisSub = createClient();
+const redisPubConnect = async () => await redisPub.connect();
+const redisSubConnect = async () => await redisSub.connect();
+
+redisPubConnect();
+redisSubConnect();
+
 const streamClients: Map<string, Set<string>> = new Map();
 
 // Store playback state per stream
@@ -18,7 +26,24 @@ interface StreamPlaybackState {
   lastUpdate: number; // timestamp in ms
 }
 
-const playbackStates: Map<string, StreamPlaybackState> = new Map();
+// 🔹 Store state in Redis instead of local Map
+async function setPlaybackState(streamId: string, state: StreamPlaybackState) {
+  await redisPub.hSet(`playback:${streamId}`, {
+    isPlaying: state.isPlaying ? "1" : "0",
+    currentTime: state.currentTime.toString(),
+    lastUpdate: state.lastUpdate.toString(),
+  });
+}
+
+async function getPlaybackState(streamId: string): Promise<StreamPlaybackState | null> {
+  const data = await redisPub.hGetAll(`playback:${streamId}`);
+  if (!data || Object.keys(data).length === 0) return null;
+  return {
+    isPlaying: data.isPlaying === "1",
+    currentTime: parseFloat(data.currentTime),
+    lastUpdate: parseInt(data.lastUpdate),
+  };
+}
 
 export function createSocketServer(server: any, prisma: PrismaClient) {
   const io = new SocketIOServer(server, {
@@ -28,25 +53,14 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
   function broadcastToStream(streamId: string, message: any) {
     console.log("Broadcasting to stream", streamId, message.action);
     io.to(streamId).emit("message", message);
+    redisPub.publish(`stream:${streamId}`, JSON.stringify(message)); // 🔹 publish
   }
 
-  // Update playback time every second for all streams
-  setInterval(() => {
-    playbackStates.forEach((state, streamId) => {
-      if (state.isPlaying) {
-        const now = Date.now();
-        const delta = (now - state.lastUpdate) / 1000;
-        state.currentTime += delta;
-        state.lastUpdate = now;
-
-        // Broadcast updated position to viewers
-        broadcastToStream(streamId, {
-          action: "sync",
-          payload: { currentTime: state.currentTime, isPlaying: true },
-        });
-      }
-    });
-  }, 1000);
+  // 🔹 Listen to Redis for cross-instance sync
+  redisSub.pSubscribe("stream:*", (msg:any, channel:any) => {
+    const streamId = channel.split(":")[1];
+    io.to(streamId).emit("message", JSON.parse(msg));
+  });
 
   io.on("connection", (socket: Socket) => {
     console.log("🔗 Client connected:", socket.id);
@@ -60,36 +74,24 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             joinedStreamId = streamId;
 
             if (!streamId || !userId) {
-              socket.emit("message", {
-                error: "❌ Missing streamId or userId",
-              });
+              socket.emit("message", { error: "❌ Missing streamId or userId" });
               return;
             }
 
             (socket as any).data = { role, streamId };
-            if (!streamClients.has(streamId))
-              streamClients.set(streamId, new Set());
+            if (!streamClients.has(streamId)) streamClients.set(streamId, new Set());
             streamClients.get(streamId)!.add(socket.id);
             socket.join(streamId);
 
-            // Initialize playback state if not exists
-            if (!playbackStates.has(streamId)) {
-              playbackStates.set(streamId, {
-                isPlaying: false,
-                currentTime: 0,
-                lastUpdate: Date.now(),
-              });
+            // Initialize playback state in Redis if not exists
+            let state = await getPlaybackState(streamId);
+            if (!state) {
+              state = { isPlaying: false, currentTime: 0, lastUpdate: Date.now() };
+              await setPlaybackState(streamId, state);
             }
 
             // Send current playback state to client
-            const state = playbackStates.get(streamId)!;
-            socket.emit("message", {
-              action: "sync",
-              payload: {
-                currentTime: state.currentTime,
-                isPlaying: state.isPlaying,
-              },
-            });
+            socket.emit("message", { action: "playback_state", payload: state });
 
             broadcastToStream(streamId, {
               action: "viewer_count",
@@ -98,44 +100,26 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             break;
           }
 
-          // Playback control actions
           case "play": {
             if (!joinedStreamId) return;
-            const state = playbackStates.get(joinedStreamId)!;
-            state.isPlaying = true;
-            state.lastUpdate = Date.now();
+            await setPlaybackState(joinedStreamId, { isPlaying: true, currentTime: 0, lastUpdate: Date.now() });
             broadcastToStream(joinedStreamId, { action: "play" });
             break;
           }
 
           case "pause": {
             if (!joinedStreamId) return;
-            const state = playbackStates.get(joinedStreamId)!;
-            // Update currentTime before pausing
-            const now = Date.now();
-            state.currentTime += (now - state.lastUpdate) / 1000;
-            state.isPlaying = false;
-            state.lastUpdate = now;
+            const state = await getPlaybackState(joinedStreamId);
+            if (state) {
+              state.isPlaying = false;
+              state.lastUpdate = Date.now();
+              await setPlaybackState(joinedStreamId, state);
+            }
             broadcastToStream(joinedStreamId, { action: "pause" });
             break;
           }
 
-          case "seek": {
-            if (!joinedStreamId) return;
-            const { position } = payload;
-            const state = playbackStates.get(joinedStreamId)!;
-            state.currentTime = position;
-            state.lastUpdate = Date.now();
-            broadcastToStream(joinedStreamId, {
-              action: "seek",
-              payload: { position },
-            });
-            break;
-          }
-
-          // Song queue actions remain unchanged
           case "add_song": {
-            console.log("hello");
             const { url, streamId, userId } = payload;
             if (!url || !streamId || !userId) {
               socket.emit("message", {
@@ -145,9 +129,16 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             }
 
             try {
-              // Check duplicate
-              let result;
-              // Validate youtube link
+              const checkSong = await prisma.song.findFirst({
+                where: { url, streamId },
+              });
+
+              if (checkSong) {
+                socket.emit("message", {
+                  error: "⚠️ Song already exists in this stream",
+                });
+                return;
+              }
               const videoId = getYouTubeVideoId(url);
               if (!videoId) {
                 socket.emit("message", { error: "⚠️ Invalid YouTube URL" });
@@ -155,22 +146,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
               }
 
               const metadata = await getYouTubeMetadata(videoId);
-
-              // Transaction: add song + update stream
-              result = await prisma.$transaction(async (tx) => {
-                // 1️⃣ Check if download exists
-                let download = await tx.downloadedSong.findUnique({
-                  where: { url },
-                });
-
-                // 2️⃣ If not, create it
-                if (!download) {
-                  download = await tx.downloadedSong.create({
-                    data: { url, path: "" },
-                  });
-                }
-
-                // 3️⃣ Create the song and pin it to download
+              const result = await prisma.$transaction(async (tx:any) => {
                 const newSong = await tx.song.create({
                   data: {
                     url,
@@ -180,15 +156,9 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                     duration: metadata.duration,
                     addedAt: new Date(),
                     addedBy: { connect: { id: userId } },
-
-                    // ✅ Link song to downloadedSong
-                    downloadedSong: {
-                      connect: { id: download.id },
-                    },
                   },
                 });
 
-                // 4️⃣ Handle stream logic
                 const stream = await tx.stream.findUnique({
                   where: { id: streamId },
                   select: { currentSongId: true },
@@ -208,12 +178,14 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                     include: { currentSong: true, queue: true },
                   });
                 }
-                axios.post(`http://localhost:4000`, { url: url });
+
                 return { newSong, updatedQueue: updatedStream.queue };
               });
 
-              socket.emit("message", { action: "song_added", data: result });
 
+              await redisPub.rPush(`queue:${streamId}`, JSON.stringify(result.newSong));
+
+              socket.emit("message", { action: "song_added", data: result });
               broadcastToStream(streamId, {
                 action: "song_added_broadcast",
                 data: result,
@@ -238,7 +210,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             break;
 
           case "skip_song":
-            await skipSongHandler(socket, payload, prisma, (msg) =>
+            await skipSongHandler(socket,payload, prisma, (msg) =>
               broadcastToStream(joinedStreamId!, msg)
             );
             break;
@@ -252,11 +224,9 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
       }
     });
 
-    // Disconnect cleanup
     socket.on("disconnect", () => {
       const { role, streamId } = (socket as any).data || {};
-      if (role === "host" && streamId)
-        io.to(streamId).emit("host-disconnected", { streamId });
+      if (role === "host" && streamId) io.to(streamId).emit("host-disconnected", { streamId });
       if (joinedStreamId) {
         const clients = streamClients.get(joinedStreamId);
         if (clients) {
