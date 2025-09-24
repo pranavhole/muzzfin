@@ -2,14 +2,13 @@
 
 import { useState, useEffect } from "react";
 import { Stream } from "@/lib/types";
-import { getStreams } from "@/lib/mock-data";
 import { StreamCard } from "@/components/StreamCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Radio, Loader2, Search } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import axios from "axios";
-import { any } from "zod";
+
 
 export default function StreamsPage() {
   const [streams, setStreams] = useState<Stream[]>([]);

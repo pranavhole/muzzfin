@@ -1,4 +1,4 @@
-// pages/api/auth/[...nextauth].ts
+// app/api/auth/[...nextauth]/route.ts
 import NextAuth, { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import axios from "axios";
@@ -23,7 +23,8 @@ declare module "next-auth" {
   }
 }
 
-export const authOptions: NextAuthOptions = {
+// Internal auth options (not exported)
+const authOptions: NextAuthOptions = {
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID ?? "",
@@ -37,7 +38,7 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, account, user }) {
       if (account && user) {
         try {
-          // 🔎 Try to fetch user by email first
+          // Try to fetch user by email from backend
           const existingUser = await axios.get(
             `${process.env.SERVER_URL}/api/v1/users/${user.email}`
           );
@@ -45,7 +46,7 @@ export const authOptions: NextAuthOptions = {
           if (existingUser.data?.user) {
             token.id = existingUser.data.user.id;
           } else {
-            // 🆕 If not found, create new user
+            // Create new user if not found
             const res = await axios.post(
               `${process.env.SERVER_URL}/api/v1/users`,
               {
@@ -61,7 +62,6 @@ export const authOptions: NextAuthOptions = {
           console.error("Error syncing with backend:", err);
         }
       }
-
       return token;
     },
 
@@ -73,8 +73,10 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  secret: process.env.NEXTAUTH_SECRET || "fallback_secret",
+  secret: process.env.NEXTAUTH_SECRET ?? "fallback_secret",
 };
 
+// App Router expects HTTP method exports
 const handler = NextAuth(authOptions);
+
 export { handler as GET, handler as POST };

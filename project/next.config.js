@@ -7,6 +7,9 @@ experimental: {
     ignoreDuringBuilds: true,
   },
   images: { unoptimized: true },
+  fonts: {
+    google: false, // disables fetching Google Fonts during build
+  },
 };
 
 module.exports = nextConfig;
