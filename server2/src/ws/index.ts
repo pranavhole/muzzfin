@@ -8,7 +8,7 @@ import { createClient } from "redis";
 import dotenv from "dotenv";
 dotenv.config();
 
-const redisUrl = process.env.REDIS_URL;
+const redisUrl =  "redis://default:xxXaPbgzkRHgmAxkhwmfJkbkkXylbLth@caboose.proxy.rlwy.net:31117";
 
 if (!redisUrl) {
   throw new Error("❌ Missing REDIS_URL env variable");
