@@ -5,17 +5,35 @@ import { voteSongHandler } from "./handlers/voteSong";
 import { removeSongHandler } from "./handlers/removeSong";
 import { skipSongHandler } from "./handlers/skipSong";
 import { createClient } from "redis";
+import dotenv from "dotenv";
+dotenv.config();
+
+const redisUrl = process.env.REDIS_URL;
+
+if (!redisUrl) {
+  throw new Error("❌ Missing REDIS_URL env variable");
+}
+
+// Railway often requires TLS if using "rediss://"
 
 const prisma = new PrismaClient();
 
+const redisPub = createClient({ url: redisUrl });
+const redisSub = createClient({ url: redisUrl });
 
-const redisPub = createClient();
-const redisSub = createClient();
 const redisPubConnect = async () => await redisPub.connect();
 const redisSubConnect = async () => await redisSub.connect();
+async function connectRedis() {
+  try {
+    redisPubConnect();
+    redisSubConnect();
+    console.log("✅ Connected to Redis on Railway");
+  } catch (err) {
+    console.error("❌ Redis connection failed:", err);
+  }
+}
+connectRedis()
 
-redisPubConnect();
-redisSubConnect();
 
 const streamClients: Map<string, Set<string>> = new Map();
 
@@ -57,7 +75,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
   }
 
   // 🔹 Listen to Redis for cross-instance sync
-  redisSub.pSubscribe("stream:*", (msg:any, channel:any) => {
+  redisSub.pSubscribe("stream:*", (msg: any, channel: any) => {
     const streamId = channel.split(":")[1];
     io.to(streamId).emit("message", JSON.parse(msg));
   });
@@ -146,7 +164,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
               }
 
               const metadata = await getYouTubeMetadata(videoId);
-              const result = await prisma.$transaction(async (tx:any) => {
+              const result = await prisma.$transaction(async (tx: any) => {
                 const newSong = await tx.song.create({
                   data: {
                     url,
@@ -210,7 +228,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             break;
 
           case "skip_song":
-            await skipSongHandler(socket,payload, prisma, (msg) =>
+            await skipSongHandler(socket, payload, prisma, (msg) =>
               broadcastToStream(joinedStreamId!, msg)
             );
             break;

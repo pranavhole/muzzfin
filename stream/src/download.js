@@ -4,21 +4,31 @@ import { Worker, Queue } from "bullmq";
 import ytdl from "@distube/ytdl-core";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
+import dotenv from "dotenv";
 import { spawn } from "child_process";
 import axios from "axios";
 import pLimit from "p-limit"; // npm i p-limit
 
-const connection = { host: "127.0.0.1", port: 6379 };
 
+dotenv.config();
+const connection = process.env.REDIS_URL
+  ? process.env.REDIS_URL
+  : {
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT),
+    username: process.env.REDIS_USERNAME,
+    password: process.env.REDIS_PASSWORD,
+    ...(process.env.REDIS_TLS === "true" && { tls: {} }),
+  };
 const s3 = new S3Client({
-  region: "auto",
-  endpoint: "https://aa59a684f4939becff5d771a785f9eca.r2.cloudflarestorage.com",
+  region: process.env.AWS_REGION,
+  endpoint: process.env.AWS_ENDPOINT,
   credentials: {
-    accessKeyId: "0e81c97a48c1fe621abb289bb2cab3e3",
-    secretAccessKey:
-      "926823340e9b0e58da2f35d42b6f4fe56d47326f84ec359307a19e922b1c13b2",
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
 });
+
 
 // 🔄 Retry wrapper with exponential backoff
 async function uploadWithRetry(params, retries = 3) {
@@ -118,8 +128,8 @@ const worker = new Worker(
     fs.rmdirSync(basePath);
 
     // 🔗 Save metadata
-    const playlistUrl = `https://aa59a684f4939becff5d771a785f9eca.r2.cloudflarestorage.com/songs/${uuid}/${playlistName}`;
-    await axios.put(`http://localhost:5000/api/v1/songs`, {
+    const playlistUrl = `${process.env.AWS_ENDPOINT}/${process.env.S3_BUCKET}/${uuid}/${playlistName}`;
+    await axios.put(process.env.API_URL, {
       id: uuid,
       url,
     });

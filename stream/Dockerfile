@@ -13,4 +13,4 @@ COPY . .
 
 EXPOSE 4000
 
-CMD ["node", "index.js"]
+CMD ["node", "src/index.js"]
