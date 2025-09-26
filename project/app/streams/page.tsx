@@ -36,7 +36,7 @@ export default function StreamsPage() {
   const fetchStreams = async () => {
     setIsLoading(true);
     try {
-      const allStreams = await axios.get("http://localhost:5000/api/v1/streams",{params: {mode:"all"}}).then(res => res.data);
+      const allStreams = await axios.get(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/streams`,{params: {mode:"all"}}).then(res => res.data);
       // Filter to only show active streams
       const activeStreams = allStreams.filter((stream:any) => stream.isActive);
       setStreams(activeStreams);

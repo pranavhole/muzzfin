@@ -47,7 +47,7 @@ export default function StreamContent() {
       setIsLoading(true);
       try {
         const { data } = await axios.get(
-          "http://localhost:5000/api/v1/streams",
+          `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/streams`,
           {
             params: { mode: "listen", streamId: id, userId: user.id },
           }

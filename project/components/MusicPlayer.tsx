@@ -59,7 +59,7 @@ export default function MusicPlayer({
     const poll = async () => {
       try {
         const res = await axios.get(
-          `http://localhost:5000/api/v1/play/ready/${currentSong.id}`
+          `${process.env.NEXT_PUBLIC_BACKEND_URL}api/v1/play/ready/${currentSong.id}`
         );
         if (!active) return;
 
@@ -88,7 +88,7 @@ export default function MusicPlayer({
 
   const audioUrl =
     isReady && currentSong
-      ? `http://localhost:5000/api/v1/play/${id}/playlist.m3u8`
+      ? `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/play/${id}/playlist.m3u8`
       : null;
 
   // setup HLS
