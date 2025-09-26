@@ -3,6 +3,7 @@ import NextAuth, { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import axios from "axios";
 
+const NEXTAUTH_URL = process.env.NEXTAUTH_URL ??"https://muzzy.pranavhole.space";
 declare module "next-auth" {
   interface Session {
     user: {
@@ -71,6 +72,10 @@ const authOptions: NextAuthOptions = {
         session.user.lastSeen = new Date().toISOString();
       }
       return session;
+    },
+      async redirect({ url, baseUrl }) {
+      if (url.startsWith(baseUrl)) return url;
+      return NEXTAUTH_URL;
     },
   },
   secret: process.env.NEXTAUTH_SECRET ?? "fallback_secret",
