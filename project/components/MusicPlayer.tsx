@@ -104,7 +104,9 @@ export default function MusicPlayer({
     };
 
     const handleEnded = async () => {
-      if (onSkip) await onSkip();
+      setTimeout(async () => {
+        if (onSkip) await onSkip();
+      }, 200); 
     };
 
     const handleTimeUpdate = () => {

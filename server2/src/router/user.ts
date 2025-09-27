@@ -49,7 +49,8 @@ router.route("/").post(async (req: Request, res: Response) => {
       token,
     });
   } catch (error) {
-    res.status(500).json({ error: "Failed to create/update user" });
+    console.log(error)
+    res.status(500).json({ error});
   }
 });
 router.route("/lastSeen").post(async (req: Request, res: Response) => {

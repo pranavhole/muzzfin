@@ -73,7 +73,7 @@ export default function StreamContent() {
     if (!user || !stream) return;
     if (socket.current) return;
 
-    socket.current = io("http://localhost:5000", {
+    socket.current = io(`${process.env.NEXT_PUBLIC_BACKEND_URL}`, {
       transports: ["websocket"],
       reconnection: true,
     });
