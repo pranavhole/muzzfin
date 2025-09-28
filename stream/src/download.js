@@ -33,10 +33,7 @@ async function uploadWithRetry(params, retries = 3) {
       console.log(`☁️ Uploaded: ${params.Key}`);
       return;
     } catch (err) {
-      console.error(
-        `⚠️ Upload failed for ${params.Key}, attempt ${i + 1}:`,
-        err.message
-      );
+      console.error(`⚠️ Upload failed for ${params.Key}, attempt ${i + 1}:`, err.message);
       if (i === retries - 1) throw err;
       await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
     }
@@ -47,47 +44,48 @@ const worker = new Worker(
   'song-downloads',
   async (job) => {
     const { url } = job.data;
-    console.log(`🎶 Downloading (HLS, normalized AAC) from: ${url}`);
+    console.log(`🎶 Downloading from: ${url}`);
 
-    // ✅ Check if already processed
+    // Check if already processed
     const song = await axios.get(process.env.API_URL, { params: { url } });
     if (song.data.path) {
-      console.log('✅ Song already processed, skipping download.');
+      console.log('✅ Already processed, skipping download.');
       return { url: song.data.songId };
     }
 
     const uuid = uuidv4();
-    const basePath = path.join('downloads', uuid);
+    const basePath = path.join('/tmp', uuid); // safer on Railway
     const playlistName = 'playlist.m3u8';
     fs.mkdirSync(basePath, { recursive: true });
 
-    // 🎧 Step 1: Download to AAC with loudness normalization
     const tempFile = path.join(basePath, 'audio.m4a');
-    const cookiesPath = 'cookies.txt'; // Railway mounted file
+    const cookiesPath = path.join(process.cwd(), 'cookies.txt');
 
     const ytArgs = {
       format: 'bestaudio/best',
       output: tempFile,
       audioFormat: 'aac',
-      audioQuality: '5', // ~128 kbps
+      audioQuality: '5',
+      quiet: false, // show logs for debugging
       postprocessorArgs: [
         '-ar', '44100',
         '-ac', '2',
         '-b:a', '128k',
-        '-af', 'loudnorm',
+        '-af', 'loudnorm'
       ],
-      quiet: true,
     };
 
-    // 👉 Add cookies only if available
     if (fs.existsSync(cookiesPath)) {
       ytArgs.cookies = cookiesPath;
       console.log(`🍪 Using cookies from ${cookiesPath}`);
+    } else {
+      console.warn('⚠️ No cookies.txt found, may fail for age-restricted content.');
     }
 
+    // Download audio
     await ytDlp(url, ytArgs);
 
-    // 🎼 Step 2: Convert to HLS
+    // Convert to HLS
     await new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', [
         '-y',
@@ -101,48 +99,33 @@ const worker = new Worker(
         '-hls_list_size', '0',
         '-f', 'hls',
         path.join(basePath, playlistName),
-      ]);
+      ], { stdio: 'inherit' });
 
-      ffmpeg.on('close', (code) =>
-        code === 0 ? resolve(true) : reject(new Error(`ffmpeg exited ${code}`))
-      );
+      ffmpeg.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`ffmpeg exited ${code}`)));
     });
 
-    console.log('✅ Converted to HLS (AAC, normalized)');
+    console.log('✅ Converted to HLS');
 
-    // ☁️ Step 3: Upload all HLS segments
+    // Upload
     const filesToUpload = fs.readdirSync(basePath);
     const limit = pLimit(5);
-    await Promise.all(
-      filesToUpload.map((file) =>
-        limit(() =>
-          uploadWithRetry({
-            Bucket: process.env.S3_BUCKET,
-            Key: `${uuid}/${file}`,
-            Body: fs.createReadStream(path.join(basePath, file)),
-            ContentType: file.endsWith('.m3u8')
-              ? 'application/vnd.apple.mpegurl'
-              : 'video/mp2t',
-          })
-        )
-      )
-    );
+    await Promise.all(filesToUpload.map((file) => 
+      limit(() => uploadWithRetry({
+        Bucket: process.env.S3_BUCKET,
+        Key: `${uuid}/${file}`,
+        Body: fs.createReadStream(path.join(basePath, file)),
+        ContentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+      }))
+    ));
 
-    // 🧹 Step 4: Cleanup
-    filesToUpload.forEach((file) =>
-      fs.unlinkSync(path.join(basePath, file))
-    );
-    if (fs.existsSync(tempFile)) {
-      fs.unlinkSync(tempFile);
-    }
+    // Cleanup
+    filesToUpload.forEach(file => fs.unlinkSync(path.join(basePath, file)));
+    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     fs.rmdirSync(basePath);
 
-    // 🔗 Step 5: Save metadata
+    // Save metadata
     const playlistUrl = `${process.env.AWS_ENDPOINT}/${process.env.S3_BUCKET}/${uuid}/${playlistName}`;
-    await axios.put(process.env.API_URL, {
-      id: uuid,
-      url,
-    });
+    await axios.put(process.env.API_URL, { id: uuid, url });
 
     return { url: playlistUrl };
   },
@@ -164,10 +147,6 @@ worker.on('failed', (job, err) => {
 const songQueue = new Queue('song-downloads', { connection: redisConnection });
 
 export async function addSongDownloadJob(url) {
-  await songQueue.add(
-    'download-song',
-    { url },
-    { removeOnComplete: true, removeOnFail: true }
-  );
+  await songQueue.add('download-song', { url }, { removeOnComplete: true, removeOnFail: true });
   console.log(`📥 Job added for: ${url}`);
 }
