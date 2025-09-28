@@ -1,19 +1,27 @@
-import fs from 'fs';
-import path from 'path';
-import { Worker, Queue } from 'bullmq';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { v4 as uuidv4 } from 'uuid';
-import dotenv from 'dotenv';
-import { spawn } from 'child_process';
-import axios from 'axios';
-import pLimit from 'p-limit';
-import IORedis from 'ioredis';
-import ytDlp from 'yt-dlp-exec';
+import fs from "fs";
+import path from "path";
+import { Worker, Queue } from "bullmq";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { v4 as uuidv4 } from "uuid";
+import dotenv from "dotenv";
+import { spawn } from "child_process";
+import axios from "axios";
+import pLimit from "p-limit";
+import IORedis from "ioredis";
+import ytDlp from "yt-dlp-exec";
 
 dotenv.config();
 
-const redisConnection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
+// Redis connection
+console.log("🔌 Connecting to Redis...");
+const redisConnection = new IORedis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+});
+redisConnection.on("connect", () => console.log("✅ Redis connected"));
+redisConnection.on("error", (err) => console.error("❌ Redis error:", err));
 
+// S3 Client
+console.log("☁️ Setting up S3 client...");
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   endpoint: process.env.AWS_ENDPOINT,
@@ -23,137 +31,157 @@ const s3 = new S3Client({
   },
 });
 
-// S3 upload with retry
+// Upload with retry
 async function uploadWithRetry(params, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
+      console.log(`⬆️ Uploading ${params.Key}, attempt ${i + 1}...`);
       await s3.send(new PutObjectCommand(params));
       console.log(`☁️ Uploaded: ${params.Key}`);
       return;
     } catch (err) {
-      console.error(`⚠️ Upload failed for ${params.Key}, attempt ${i + 1}:`, err.message);
+      console.error(`⚠️ Upload failed for ${params.Key}, attempt ${i + 1}:`, err);
       if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
 
-function sanitizeUrl(url) {
-  // strip playlist params like &list=, &start_radio=
-  return url.split('&list=')[0].split('&start_radio=')[0];
-}
-
-async function runWithTimeout(promise, ms, errorMessage = '⏱️ Timeout') {
-  let timeout;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeout = setTimeout(() => reject(new Error(errorMessage)), ms);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeout));
-}
-
+// Worker
+console.log("⚙️ Starting worker...");
 const worker = new Worker(
-  'song-downloads',
+  "song-downloads",
   async (job) => {
-    let { url } = job.data;
-    url = sanitizeUrl(url);
-    console.log(`🎶 Starting download job for: ${url}`);
+    console.log(`🛠️ Worker picked job ${job.id} with data:`, job.data);
 
-    // Check if already processed
+    const { url } = job.data;
+    console.log(`🎶 Download job started: ${url}`);
+
+    // Already processed?
     try {
+      console.log("🔍 Checking API for existing record...");
       const song = await axios.get(process.env.API_URL, { params: { url } });
-      if (song.data.path) {
-        console.log('✅ Song already processed, skipping download.');
+      if (song.data?.path) {
+        console.log("✅ Already exists, skipping.");
         return { url: song.data.songId };
       }
     } catch (err) {
-      console.error('⚠️ Error checking API:', err.message);
+      console.warn("⚠️ API check failed:", err.message);
     }
 
+    // Paths
     const uuid = uuidv4();
-    const basePath = path.join('/tmp', uuid);
+    const basePath = path.join("/tmp", uuid);
+    console.log(`📂 Creating temp folder: ${basePath}`);
     fs.mkdirSync(basePath, { recursive: true });
-    console.log(`📂 Created temp folder: ${basePath}`);
+    const tempFile = path.join(basePath, "audio.webm");
 
-    const tempFile = path.join(basePath, 'audio.m4a');
-    const cookiesPath = 'cookies.txt';
-
+    // yt-dlp download (no re-encode)
     const ytArgs = {
-      format: 'bestaudio/best',
+      format: "bestaudio/best",
       output: tempFile,
-      audioFormat: 'aac',
-      audioQuality: '5',
-      postprocessorArgs: ['-ar', '44100', '-ac', '2', '-b:a', '128k', '-af', 'loudnorm'],
-      noPlaylist: true, // 🚫 prevent playlist downloads
-      quiet: false,
+      noPlaylist: true,
+      verbose: true,
     };
-    
-    if (fs.existsSync(cookiesPath)) {
-      ytArgs.cookies = cookiesPath;
-      console.log(`🍪 Using cookies from ${cookiesPath}`);
-    }
 
-    console.log('▶️ Running yt-dlp...');
+    console.log("▶️ Running yt-dlp with args:", ytArgs);
     try {
-      await runWithTimeout(ytDlp(url, ytArgs), 5 * 60 * 1000, 'yt-dlp took too long');
-      console.log('✅ yt-dlp finished successfully');
+      await ytDlp(url, ytArgs);
+      console.log("✅ yt-dlp finished successfully");
     } catch (err) {
-      console.error('❌ yt-dlp failed:', err.message);
+      console.error("❌ yt-dlp failed with error:", err);
       throw err;
     }
 
-    // Convert to HLS
-    const playlistName = 'playlist.m3u8';
-    console.log('▶️ Starting ffmpeg HLS conversion...');
+    // Convert to HLS with ffmpeg
+    const playlistName = "playlist.m3u8";
+    console.log("▶️ Starting ffmpeg HLS conversion...");
     await new Promise((resolve, reject) => {
-      const ffmpeg = spawn('ffmpeg', [
-        '-y',
-        '-i', tempFile,
-        '-vn',
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-ar', '44100',
-        '-ac', '2',
-        '-hls_time', '12',
-        '-hls_list_size', '0',
-        '-f', 'hls',
-        path.join(basePath, playlistName),
-      ], { stdio: 'inherit' });
-
-      ffmpeg.on('close', (code) =>
-        code === 0 ? resolve(true) : reject(new Error(`ffmpeg exited with code ${code}`))
+      const ffmpeg = spawn(
+        "ffmpeg",
+        [
+          "-y",
+          "-i", tempFile,
+          "-vn",
+          "-c:a", "aac",
+          "-b:a", "128k",
+          "-ar", "44100",
+          "-ac", "2",
+          "-af", "loudnorm",
+          "-hls_time", "12",
+          "-hls_list_size", "0",
+          "-f", "hls",
+          path.join(basePath, playlistName),
+        ],
+        { stdio: "inherit" }
       );
+
+      ffmpeg.on("error", (err) => {
+        console.error("❌ ffmpeg spawn failed:", err);
+        reject(err);
+      });
+
+      ffmpeg.on("close", (code) => {
+        console.log(`📀 ffmpeg exited with code ${code}`);
+        code === 0 ? resolve() : reject(new Error(`ffmpeg exited with code ${code}`));
+      });
     });
-    console.log('✅ HLS conversion done');
+    console.log("✅ HLS ready");
 
     // Upload files
     const filesToUpload = fs.readdirSync(basePath);
+    console.log(`📤 Found ${filesToUpload.length} files to upload:`, filesToUpload);
+
     const limit = pLimit(5);
-    console.log(`📤 Uploading ${filesToUpload.length} files to S3...`);
-    await Promise.all(filesToUpload.map(file =>
-      limit(() =>
-        uploadWithRetry({
-          Bucket: process.env.S3_BUCKET,
-          Key: `${uuid}/${file}`,
-          Body: fs.createReadStream(path.join(basePath, file)),
-          ContentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+
+    await Promise.all(
+      filesToUpload.map((file) =>
+        limit(async () => {
+          const filePath = path.join(basePath, file);
+
+          // ✅ Read file into Buffer instead of streaming
+          const fileData = await fs.promises.readFile(filePath);
+
+          await uploadWithRetry({
+            Bucket: process.env.S3_BUCKET,
+            Key: `${uuid}/${file}`,
+            Body: fileData,
+            ContentType: file.endsWith(".m3u8")
+              ? "application/vnd.apple.mpegurl"
+              : "video/mp2t",
+          });
         })
       )
-    ));
+    );
 
-    console.log('🧹 Cleaning up temp files...');
-    filesToUpload.forEach(file => fs.unlinkSync(path.join(basePath, file)));
-    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-    fs.rmdirSync(basePath);
 
-    const playlistUrl = `${process.env.AWS_ENDPOINT}/${process.env.S3_BUCKET}/${uuid}/${playlistName}`;
-    console.log(`🔗 Playlist URL: ${playlistUrl}`);
+    // Cleanup
+    console.log("🧹 Cleaning up temp files...");
+    filesToUpload.forEach((file) => {
+      try {
+        fs.unlinkSync(path.join(basePath, file));
+      } catch (e) {
+        console.warn(`⚠️ Failed to delete file ${file}:`, e.message);
+      }
+    });
+    try {
+      fs.rmdirSync(basePath);
+    } catch (e) {
+      console.warn("⚠️ Failed to remove temp dir:", e.message);
+    }
+    console.log("🧹 Cleanup done");
+
+    // Playlist URL
+    const playlistUrl = `${process.env.S3_BASE_URL}/${uuid}/${playlistName}`;
+    console.log(`🔗 Playlist URL generated: ${playlistUrl}`);
 
     // Save metadata
     try {
+      console.log("💾 Saving metadata to API...");
       await axios.put(process.env.API_URL, { id: uuid, url });
-      console.log('✅ Metadata saved to API');
+      console.log("✅ Metadata saved");
     } catch (err) {
-      console.error('⚠️ Failed to save metadata:', err.message);
+      console.error("⚠️ Metadata save failed:", err.message);
     }
 
     return { url: playlistUrl };
@@ -161,12 +189,15 @@ const worker = new Worker(
   { connection: redisConnection, lockDuration: 600_000, stalledInterval: 300_000 }
 );
 
-worker.on('completed', (job, result) => console.log(`🎉 Job ${job.id} completed:`, result.url));
-worker.on('failed', (job, err) => console.error(`❌ Job ${job.id} failed:`, err));
+worker.on("completed", (job, result) => console.log(`🎉 Job ${job.id} completed -> ${result.url}`));
+worker.on("failed", (job, err) => console.error(`❌ Job ${job.id} failed:`, err));
 
-const songQueue = new Queue('song-downloads', { connection: redisConnection });
+// Queue
+console.log("📦 Creating queue...");
+const songQueue = new Queue("song-downloads", { connection: redisConnection });
 
 export async function addSongDownloadJob(url) {
-  await songQueue.add('download-song', { url }, { removeOnComplete: true, removeOnFail: true });
-  console.log(`📥 Job added for: ${url}`);
+  console.log(`📥 Adding job for URL: ${url}`);
+  await songQueue.add("download-song", { url }, { removeOnComplete: true, removeOnFail: true });
+  console.log(`✅ Job successfully queued for: ${url}`);
 }
