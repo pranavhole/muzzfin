@@ -12,9 +12,7 @@ import ytDlp from 'yt-dlp-exec';
 
 dotenv.config();
 
-const redisConnection = new IORedis(process.env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-});
+const redisConnection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
@@ -25,7 +23,6 @@ const s3 = new S3Client({
   },
 });
 
-// Utility: S3 upload with retry
 async function uploadWithRetry(params, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -35,7 +32,7 @@ async function uploadWithRetry(params, retries = 3) {
     } catch (err) {
       console.error(`⚠️ Upload failed for ${params.Key}, attempt ${i + 1}:`, err.message);
       if (i === retries - 1) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
@@ -44,48 +41,52 @@ const worker = new Worker(
   'song-downloads',
   async (job) => {
     const { url } = job.data;
-    console.log(`🎶 Downloading from: ${url}`);
+    console.log(`🎶 Starting download job for: ${url}`);
 
     // Check if already processed
-    const song = await axios.get(process.env.API_URL, { params: { url } });
-    if (song.data.path) {
-      console.log('✅ Already processed, skipping download.');
-      return { url: song.data.songId };
+    try {
+      const song = await axios.get(process.env.API_URL, { params: { url } });
+      if (song.data.path) {
+        console.log('✅ Song already processed, skipping download.');
+        return { url: song.data.songId };
+      }
+    } catch (err) {
+      console.error('⚠️ Error checking API:', err.message);
     }
 
     const uuid = uuidv4();
-    const basePath = path.join('/tmp', uuid); // safer on Railway
-    const playlistName = 'playlist.m3u8';
+    const basePath = path.join('/tmp', uuid);
     fs.mkdirSync(basePath, { recursive: true });
+    console.log(`📂 Created temp folder: ${basePath}`);
 
     const tempFile = path.join(basePath, 'audio.m4a');
-    const cookiesPath = path.join(process.cwd(), 'cookies.txt');
-
+    const cookiesPath = 'cookies.txt';
     const ytArgs = {
       format: 'bestaudio/best',
       output: tempFile,
       audioFormat: 'aac',
       audioQuality: '5',
-      quiet: false, // show logs for debugging
-      postprocessorArgs: [
-        '-ar', '44100',
-        '-ac', '2',
-        '-b:a', '128k',
-        '-af', 'loudnorm'
-      ],
+      postprocessorArgs: ['-ar', '44100', '-ac', '2', '-b:a', '128k', '-af', 'loudnorm'],
+      quiet: false, // verbose output for logging
     };
 
     if (fs.existsSync(cookiesPath)) {
       ytArgs.cookies = cookiesPath;
       console.log(`🍪 Using cookies from ${cookiesPath}`);
-    } else {
-      console.warn('⚠️ No cookies.txt found, may fail for age-restricted content.');
     }
 
-    // Download audio
-    await ytDlp(url, ytArgs);
+    console.log('▶️ Running yt-dlp...');
+    try {
+      await ytDlp(url, ytArgs);
+      console.log('✅ yt-dlp finished successfully');
+    } catch (err) {
+      console.error('❌ yt-dlp failed:', err.message);
+      throw err;
+    }
 
     // Convert to HLS
+    const playlistName = 'playlist.m3u8';
+    console.log('▶️ Starting ffmpeg HLS conversion...');
     await new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', [
         '-y',
@@ -101,48 +102,50 @@ const worker = new Worker(
         path.join(basePath, playlistName),
       ], { stdio: 'inherit' });
 
-      ffmpeg.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`ffmpeg exited ${code}`)));
+      ffmpeg.on('close', (code) =>
+        code === 0 ? resolve(true) : reject(new Error(`ffmpeg exited with code ${code}`))
+      );
     });
+    console.log('✅ HLS conversion done');
 
-    console.log('✅ Converted to HLS');
-
-    // Upload
+    // Upload files
     const filesToUpload = fs.readdirSync(basePath);
     const limit = pLimit(5);
-    await Promise.all(filesToUpload.map((file) => 
-      limit(() => uploadWithRetry({
-        Bucket: process.env.S3_BUCKET,
-        Key: `${uuid}/${file}`,
-        Body: fs.createReadStream(path.join(basePath, file)),
-        ContentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
-      }))
+    console.log(`📤 Uploading ${filesToUpload.length} files to S3...`);
+    await Promise.all(filesToUpload.map(file =>
+      limit(() =>
+        uploadWithRetry({
+          Bucket: process.env.S3_BUCKET,
+          Key: `${uuid}/${file}`,
+          Body: fs.createReadStream(path.join(basePath, file)),
+          ContentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+        })
+      )
     ));
 
-    // Cleanup
+    console.log('🧹 Cleaning up temp files...');
     filesToUpload.forEach(file => fs.unlinkSync(path.join(basePath, file)));
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     fs.rmdirSync(basePath);
 
-    // Save metadata
     const playlistUrl = `${process.env.AWS_ENDPOINT}/${process.env.S3_BUCKET}/${uuid}/${playlistName}`;
-    await axios.put(process.env.API_URL, { id: uuid, url });
+    console.log(`🔗 Playlist URL: ${playlistUrl}`);
+
+    // Save metadata
+    try {
+      await axios.put(process.env.API_URL, { id: uuid, url });
+      console.log('✅ Metadata saved to API');
+    } catch (err) {
+      console.error('⚠️ Failed to save metadata:', err.message);
+    }
 
     return { url: playlistUrl };
   },
-  {
-    connection: redisConnection,
-    lockDuration: 600_000,
-    stalledInterval: 300_000,
-  }
+  { connection: redisConnection, lockDuration: 600_000, stalledInterval: 300_000 }
 );
 
-worker.on('completed', (job, result) => {
-  console.log(`🎉 Job ${job.id} completed:`, result.url);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`❌ Job ${job.id} failed:`, err);
-});
+worker.on('completed', (job, result) => console.log(`🎉 Job ${job.id} completed:`, result.url));
+worker.on('failed', (job, err) => console.error(`❌ Job ${job.id} failed:`, err));
 
 const songQueue = new Queue('song-downloads', { connection: redisConnection });
 
