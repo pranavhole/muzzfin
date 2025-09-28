@@ -25,6 +25,7 @@ const s3 = new S3Client({
   },
 });
 
+// Utility: S3 upload with retry
 async function uploadWithRetry(params, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -48,7 +49,7 @@ const worker = new Worker(
     const { url } = job.data;
     console.log(`🎶 Downloading (HLS, normalized AAC) from: ${url}`);
 
-    // Check if already processed
+    // ✅ Check if already processed
     const song = await axios.get(process.env.API_URL, { params: { url } });
     if (song.data.path) {
       console.log('✅ Song already processed, skipping download.');
@@ -62,7 +63,9 @@ const worker = new Worker(
 
     // 🎧 Step 1: Download to AAC with loudness normalization
     const tempFile = path.join(basePath, 'audio.m4a');
-    await ytDlp(url, {
+    const cookiesPath = 'cookies.txt'; // Railway mounted file
+
+    const ytArgs = {
       format: 'bestaudio/best',
       output: tempFile,
       audioFormat: 'aac',
@@ -71,10 +74,18 @@ const worker = new Worker(
         '-ar', '44100',
         '-ac', '2',
         '-b:a', '128k',
-        '-af', 'loudnorm'
+        '-af', 'loudnorm',
       ],
       quiet: true,
-    });
+    };
+
+    // 👉 Add cookies only if available
+    if (fs.existsSync(cookiesPath)) {
+      ytArgs.cookies = cookiesPath;
+      console.log(`🍪 Using cookies from ${cookiesPath}`);
+    }
+
+    await ytDlp(url, ytArgs);
 
     // 🎼 Step 2: Convert to HLS
     await new Promise((resolve, reject) => {
@@ -117,10 +128,10 @@ const worker = new Worker(
       )
     );
 
-    // 🧹 Step 4: Cleanup (remove all files + folder)
-    filesToUpload.forEach((file) => {
-      fs.unlinkSync(path.join(basePath, file));
-    });
+    // 🧹 Step 4: Cleanup
+    filesToUpload.forEach((file) =>
+      fs.unlinkSync(path.join(basePath, file))
+    );
     if (fs.existsSync(tempFile)) {
       fs.unlinkSync(tempFile);
     }
