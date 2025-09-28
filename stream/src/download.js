@@ -83,10 +83,10 @@ const worker = new Worker(
       audioFormat: 'aac',
       audioQuality: '5',
       postprocessorArgs: ['-ar', '44100', '-ac', '2', '-b:a', '128k', '-af', 'loudnorm'],
-      noplaylist: true, // 🚫 prevent playlist downloads
+      noPlaylist: true, // 🚫 prevent playlist downloads
       quiet: false,
     };
-
+    
     if (fs.existsSync(cookiesPath)) {
       ytArgs.cookies = cookiesPath;
       console.log(`🍪 Using cookies from ${cookiesPath}`);
