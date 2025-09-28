@@ -22,9 +22,15 @@ router.route("/").get(async(req:any , res:any)=>{
 router.route('/').put(async(req:any,res:any)=>{
   try {
       const {id,url} = req.body;
-      const updatedSong = await prisma.downloadedSong.update({
+      const isReady:boolean = true;
+      const updatedSong = await prisma.downloadedSong.upsert({
           where: { url: url },
-          data: { path: id }
+          update: { path: id , isReady:isReady },
+          create:{
+            url:url,
+            path:id,
+            isReady:isReady
+          }
       });
       res.status(200).json(updatedSong);
   } catch (error) {

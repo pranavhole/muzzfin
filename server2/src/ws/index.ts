@@ -6,6 +6,7 @@ import { removeSongHandler } from "./handlers/removeSong";
 import { skipSongHandler } from "./handlers/skipSong";
 import { createClient } from "redis";
 import dotenv from "dotenv";
+import axios from "axios"
 dotenv.config();
 
 const redisUrl =  "redis://default:xxXaPbgzkRHgmAxkhwmfJkbkkXylbLth@caboose.proxy.rlwy.net:31117";
@@ -140,30 +141,30 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
           case "add_song": {
             const { url, streamId, userId } = payload;
             if (!url || !streamId || !userId) {
-              socket.emit("message", {
-                error: "⚠️ Missing url, streamId, or userId",
-              });
+              socket.emit("message", { error: "⚠️ Missing url, streamId, or userId" });
               return;
             }
-
+          
             try {
-              const checkSong = await prisma.song.findFirst({
-                where: { url, streamId },
-              });
-
+              // 1️⃣ Check if song already exists in the stream
+              const checkSong = await prisma.song.findFirst({ where: { url, streamId } });
               if (checkSong) {
-                socket.emit("message", {
-                  error: "⚠️ Song already exists in this stream",
-                });
+                socket.emit("message", { error: "⚠️ Song already exists in this stream" });
                 return;
               }
+          
+              // 2️⃣ Check if the song has already been downloaded
+              const downloadedSong = await prisma.downloadedSong.findUnique({ where: { url } });
+          
+              // 3️⃣ Get metadata
               const videoId = getYouTubeVideoId(url);
               if (!videoId) {
                 socket.emit("message", { error: "⚠️ Invalid YouTube URL" });
                 return;
               }
-
               const metadata = await getYouTubeMetadata(videoId);
+          
+              // 4️⃣ Create song and link
               const result = await prisma.$transaction(async (tx: any) => {
                 const newSong = await tx.song.create({
                   data: {
@@ -174,14 +175,19 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                     duration: metadata.duration,
                     addedAt: new Date(),
                     addedBy: { connect: { id: userId } },
+                    downloadedSong: downloadedSong
+                      ? { connect: { id: downloadedSong.id } }
+                      : undefined,
+                    hasSong: !!downloadedSong,
                   },
                 });
-
+          
+                // 5️⃣ Update stream
                 const stream = await tx.stream.findUnique({
                   where: { id: streamId },
                   select: { currentSongId: true },
                 });
-
+          
                 let updatedStream;
                 if (!stream?.currentSongId) {
                   updatedStream = await tx.stream.update({
@@ -196,25 +202,39 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                     include: { currentSong: true, queue: true },
                   });
                 }
-
+          
                 return { newSong, updatedQueue: updatedStream.queue };
               });
-
-
+          
+              // 6️⃣ Push to Redis
               await redisPub.rPush(`queue:${streamId}`, JSON.stringify(result.newSong));
-
+          
+              // 7️⃣ Trigger download only if song isn't downloaded yet
+              if (!downloadedSong) {
+                try {
+                  await axios.post(`${process.env.BACKEND_URL}/`, {
+                    hostId: streamId,
+                    url,
+                  });
+                  console.log(`📥 Download job triggered for: ${url}`);
+                } catch (err:any) {
+                  console.error("⚠️ Failed to trigger download job:", err.message);
+                  socket.emit("message", { error: "Failed to trigger download job" });
+                }
+              }
+          
+              // 8️⃣ Emit socket events
               socket.emit("message", { action: "song_added", data: result });
-              broadcastToStream(streamId, {
-                action: "song_added_broadcast",
-                data: result,
-              });
+              broadcastToStream(streamId, { action: "song_added_broadcast", data: result });
+          
             } catch (error) {
               console.error("❌ Error creating song:", error);
               socket.emit("message", { error: "Failed to create song" });
             }
+          
             break;
           }
-
+          
           case "vote_song":
             await voteSongHandler(socket, payload, prisma, (msg) =>
               broadcastToStream(joinedStreamId!, msg)
