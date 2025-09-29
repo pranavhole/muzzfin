@@ -129,6 +129,7 @@ const worker = new Worker(
     console.log("✅ HLS ready");
 
     // Upload files
+    // Upload files
     const filesToUpload = fs.readdirSync(basePath);
     console.log(`📤 Found ${filesToUpload.length} files to upload:`, filesToUpload);
 
@@ -153,7 +154,6 @@ const worker = new Worker(
         })
       )
     );
-
 
     // Cleanup
     console.log("🧹 Cleaning up temp files...");
