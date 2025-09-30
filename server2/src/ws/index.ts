@@ -222,7 +222,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                   socket.emit("message", { error: "Failed to trigger download job" });
                 }
               }
-          
+              
               // 8️⃣ Emit socket events
               socket.emit("message", { action: "song_added", data: result });
               broadcastToStream(streamId, { action: "song_added_broadcast", data: result });
@@ -252,7 +252,40 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
               broadcastToStream(joinedStreamId!, msg)
             );
             break;
-
+          
+            case "seek": {
+              if (!joinedStreamId) return;
+            
+              const { position } = payload; 
+              const time= position;
+              if (typeof time !== "number" || time < 0) {
+                socket.emit("message", { error: "⚠️ Invalid seek time" });
+                return;
+              }
+            
+              try {
+                let state = await getPlaybackState(joinedStreamId);
+                if (!state) {
+                  state = { isPlaying: false, currentTime: 0, lastUpdate: Date.now() };
+                }
+            
+                state.currentTime = time;
+                state.lastUpdate = Date.now();
+                await setPlaybackState(joinedStreamId, state);
+            
+                broadcastToStream(joinedStreamId, {
+                  action: "seek",
+                  payload: { currentTime: time },
+                });
+            
+              } catch (err:any) {
+                console.error("❌ Seek failed:", err.message || err);
+                socket.emit("message", { error: "Failed to seek" });
+              }
+            
+              break;
+            }
+            
           default:
             socket.emit("message", { error: "❌ Unknown action" });
         }

@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-experimental: {
+  experimental: {
     serverComponentsExternalPackages: ["undici", "cheerio"],
   },
   eslint: {
@@ -8,7 +8,18 @@ experimental: {
   },
   images: { unoptimized: true },
   fonts: {
-    google: false, // disables fetching Google Fonts during build
+    google: false,
+  },
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      // Stub Node-only modules so frontend build doesn't fail
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        "utf-8-validate": false,
+        "bufferutil": false,
+      };
+    }
+    return config;
   },
 };
 

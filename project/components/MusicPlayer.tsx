@@ -16,6 +16,7 @@ interface MusicPlayerProps {
   onPause?: () => void;
   onSkip?: () => Promise<any> | any;
   onSeek?: (time: number) => void;
+  host: boolean;
 }
 
 export default function MusicPlayer({
@@ -26,11 +27,9 @@ export default function MusicPlayer({
   onPause,
   onSkip,
   onSeek,
+  host,
 }: MusicPlayerProps) {
-  // 🎵 Song state
   const [currentSong, setCurrentSong] = useState<any>(null);
-
-  // ⏱️ Playback state
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -38,18 +37,20 @@ export default function MusicPlayer({
   const [id, setId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 🔄 Helpers
-  const lastSeekEmit = useRef<number>(0);
+  // Local seek value for smooth slider drag
+  const [seekValue, setSeekValue] = useState<number>(0);
   const seekTimeout = useRef<NodeJS.Timeout | null>(null);
   const pollTimeout = useRef<NodeJS.Timeout | null>(null);
   const attemptsRef = useRef<number>(0);
 
+  const lastSeekEmit = useRef<number>(0);
   const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "";
 
-  // 🎵 Handle stream change (centralized reset + state update)
+  // Reset when stream changes
   useEffect(() => {
     const song = stream?.currentSong || null;
     setCurrentSong(song);
+    setSeekValue(0);
 
     if (audioRef.current) {
       audioRef.current.pause();
@@ -66,7 +67,7 @@ export default function MusicPlayer({
     if (pollTimeout.current) clearTimeout(pollTimeout.current);
   }, [stream?.currentSong]);
 
-  // 📡 Poll backend until song is ready
+  // Poll backend until ready
   useEffect(() => {
     if (!currentSong) return;
     if (!BACKEND) {
@@ -103,9 +104,7 @@ export default function MusicPlayer({
         pollTimeout.current = setTimeout(poll, 2000);
       } catch (err) {
         console.error("[poll error]", err);
-        if (active) {
-          pollTimeout.current = setTimeout(poll, 4000);
-        }
+        if (active) pollTimeout.current = setTimeout(poll, 4000);
       }
     };
 
@@ -117,21 +116,18 @@ export default function MusicPlayer({
     };
   }, [currentSong?.id, BACKEND]);
 
-  // 🎶 Build audio URL
   const audioUrl =
     isReady && currentSong && id
       ? `${BACKEND}/api/v1/play/${id}/playlist.m3u8`
       : null;
 
-  // ⏭️ Shared skip handler
   const handleSkip = async () => {
     if (onSkip) await onSkip();
   };
 
-  // 📀 Setup HLS + audio listeners
+  // Setup HLS + audio
   useEffect(() => {
     if (!audioUrl || !audioRef.current) return;
-
     const audio = audioRef.current;
     let hls: Hls | null = null;
 
@@ -150,6 +146,7 @@ export default function MusicPlayer({
         lastSeekEmit.current = now;
         onSeek?.(audio.currentTime);
       }
+      setSeekValue(audio.currentTime);
     };
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -164,9 +161,7 @@ export default function MusicPlayer({
       hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
         if (data.levels?.[0]?.details) {
           setDuration(
-            data.levels[0].details.totalduration ||
-              currentSong?.duration ||
-              0
+            data.levels[0].details.totalduration || currentSong?.duration || 0
           );
         }
       });
@@ -193,29 +188,21 @@ export default function MusicPlayer({
     };
   }, [audioUrl, currentSong]);
 
-  // ▶️ Sync play/pause
+  // Play/pause sync
   useEffect(() => {
     if (!audioRef.current) return;
     if (isPlaying) {
-      audioRef.current
-        .play()
-        .catch((err) => console.warn("[Autoplay blocked]", err));
+      audioRef.current.play().catch(console.error);
     } else {
       audioRef.current.pause();
     }
   }, [isPlaying]);
 
-  // ⏩ Sync seek
-  useEffect(() => {
-    if (!audioRef.current) return;
-    if (Math.abs(audioRef.current.currentTime - currentTime) > 1) {
-      audioRef.current.currentTime = currentTime;
-    }
-  }, [currentTime]);
-
-  // 🎚️ Handle slider seek with debounce
+  // Slider drag
   const handleSeek = (value: number[]) => {
     const time = value[0];
+    setSeekValue(time);
+
     if (audioRef.current) audioRef.current.currentTime = time;
 
     if (seekTimeout.current) clearTimeout(seekTimeout.current);
@@ -229,7 +216,6 @@ export default function MusicPlayer({
     onPlay?.();
   };
 
-  // 🖼️ UI states
   if (!currentSong) return <div>No song selected</div>;
   if (error) return <div className="text-red-500">{error}</div>;
   if (isLoading) return <div>Loading player...</div>;
@@ -249,7 +235,7 @@ export default function MusicPlayer({
       <div className="flex-1">
         <h4 className="font-semibold">{currentSong.title}</h4>
         <Slider
-          value={[currentTime]}
+          value={[seekValue]}
           max={duration}
           step={1}
           className="mt-2"
@@ -263,11 +249,13 @@ export default function MusicPlayer({
           >
             {isPlaying ? <Pause /> : <Play />}
           </Button>
-          <Button size="icon" variant="outline" onClick={handleSkip}>
-            <SkipForward />
-          </Button>
+          {host && (
+            <Button size="icon" variant="outline" onClick={handleSkip}>
+              <SkipForward />
+            </Button>
+          )}
           <span className="text-xs text-muted-foreground">
-            {Math.floor(currentTime)}s / {Math.floor(duration)}s
+            {Math.floor(seekValue)}s / {Math.floor(duration)}s
           </span>
         </div>
       </div>
