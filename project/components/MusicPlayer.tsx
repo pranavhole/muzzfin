@@ -27,53 +27,84 @@ export default function MusicPlayer({
   onSkip,
   onSeek,
 }: MusicPlayerProps) {
-  const currentSong = stream?.currentSong || null;
+  // 🎵 Song state
+  const [currentSong, setCurrentSong] = useState<any>(null);
+
+  // ⏱️ Playback state
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isReady, setIsReady] = useState(false);
   const [id, setId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
+  // 🔄 Helpers
   const lastSeekEmit = useRef<number>(0);
   const seekTimeout = useRef<NodeJS.Timeout | null>(null);
+  const pollTimeout = useRef<NodeJS.Timeout | null>(null);
+  const attemptsRef = useRef<number>(0);
 
-  // reset when song changes
+  const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+
+  // 🎵 Handle stream change (centralized reset + state update)
   useEffect(() => {
+    const song = stream?.currentSong || null;
+    setCurrentSong(song);
+
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
     }
+
     setIsLoading(true);
     setIsReady(false);
     setId(null);
     setDuration(0);
-  }, [stream]);
+    setError(null);
+    attemptsRef.current = 0;
 
-  // poll until backend marks song ready
+    if (pollTimeout.current) clearTimeout(pollTimeout.current);
+  }, [stream?.currentSong]);
+
+  // 📡 Poll backend until song is ready
   useEffect(() => {
     if (!currentSong) return;
+    if (!BACKEND) {
+      setError("Missing NEXT_PUBLIC_BACKEND_URL");
+      setIsLoading(false);
+      return;
+    }
 
     let active = true;
-    let pollTimeout: NodeJS.Timeout;
+    const MAX_ATTEMPTS = 20;
 
     const poll = async () => {
       try {
+        attemptsRef.current++;
         const res = await axios.get(
-          `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/play/ready/${currentSong.id}`
+          `${BACKEND}/api/v1/play/ready/${currentSong.id}`
         );
         if (!active) return;
 
-        if (res.data.ready) {
+        if (res?.data?.ready && res?.data?.id) {
+          setId(res.data.id);
           setIsReady(true);
           setIsLoading(false);
-          setId(res.data.id);
-        } else {
-          pollTimeout = setTimeout(poll, 2000);
+          setError(null);
+          return;
         }
+
+        if (attemptsRef.current >= MAX_ATTEMPTS) {
+          setError("Timed out waiting for backend to prepare the song.");
+          setIsLoading(false);
+          return;
+        }
+
+        pollTimeout.current = setTimeout(poll, 2000);
       } catch (err) {
-        console.error("Polling error:", err);
+        console.error("[poll error]", err);
         if (active) {
-          pollTimeout = setTimeout(poll, 4000);
+          pollTimeout.current = setTimeout(poll, 4000);
         }
       }
     };
@@ -82,16 +113,22 @@ export default function MusicPlayer({
 
     return () => {
       active = false;
-      clearTimeout(pollTimeout);
+      if (pollTimeout.current) clearTimeout(pollTimeout.current);
     };
-  }, [currentSong]);
+  }, [currentSong?.id, BACKEND]);
 
+  // 🎶 Build audio URL
   const audioUrl =
-    isReady && currentSong
-      ? `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/play/${id}/playlist.m3u8`
+    isReady && currentSong && id
+      ? `${BACKEND}/api/v1/play/${id}/playlist.m3u8`
       : null;
 
-  // setup HLS
+  // ⏭️ Shared skip handler
+  const handleSkip = async () => {
+    if (onSkip) await onSkip();
+  };
+
+  // 📀 Setup HLS + audio listeners
   useEffect(() => {
     if (!audioUrl || !audioRef.current) return;
 
@@ -100,14 +137,11 @@ export default function MusicPlayer({
 
     const handleLoadedMetadata = () => {
       const dur = audio.duration;
-      setDuration(isFinite(dur) && dur > 0 ? dur : currentSong?.duration || 0);
-    };
-
-    const handleEnded = async () => {
-      setTimeout(async () => {
-        if (onSkip) await onSkip();
-        window.location.reload(); 
-      }, 200); 
+      if (isFinite(dur) && dur > 0) {
+        setDuration(dur);
+      } else if (currentSong?.duration) {
+        setDuration(currentSong.duration);
+      }
     };
 
     const handleTimeUpdate = () => {
@@ -119,7 +153,7 @@ export default function MusicPlayer({
     };
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
-    audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("ended", handleSkip);
     audio.addEventListener("timeupdate", handleTimeUpdate);
 
     if (Hls.isSupported()) {
@@ -130,13 +164,22 @@ export default function MusicPlayer({
       hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
         if (data.levels?.[0]?.details) {
           setDuration(
-            data.levels[0].details.totalduration || currentSong?.duration || 0
+            data.levels[0].details.totalduration ||
+              currentSong?.duration ||
+              0
           );
         }
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
         console.error("[HLS Error]", data);
+        if (data?.fatal) {
+          setError("Playback error (HLS). Check console for details.");
+          setIsLoading(false);
+          try {
+            hls?.destroy();
+          } catch {}
+        }
       });
     } else if (audio.canPlayType("application/vnd.apple.mpegurl")) {
       audio.src = audioUrl;
@@ -144,13 +187,13 @@ export default function MusicPlayer({
 
     return () => {
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("ended", handleSkip);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       if (hls) hls.destroy();
     };
   }, [audioUrl, currentSong]);
 
-  // sync play/pause
+  // ▶️ Sync play/pause
   useEffect(() => {
     if (!audioRef.current) return;
     if (isPlaying) {
@@ -162,7 +205,7 @@ export default function MusicPlayer({
     }
   }, [isPlaying]);
 
-  // sync seek
+  // ⏩ Sync seek
   useEffect(() => {
     if (!audioRef.current) return;
     if (Math.abs(audioRef.current.currentTime - currentTime) > 1) {
@@ -170,7 +213,7 @@ export default function MusicPlayer({
     }
   }, [currentTime]);
 
-  // handle manual slider seek with debounce
+  // 🎚️ Handle slider seek with debounce
   const handleSeek = (value: number[]) => {
     const time = value[0];
     if (audioRef.current) audioRef.current.currentTime = time;
@@ -186,8 +229,10 @@ export default function MusicPlayer({
     onPlay?.();
   };
 
-  if (isLoading) return <div>Loading player...</div>;
+  // 🖼️ UI states
   if (!currentSong) return <div>No song selected</div>;
+  if (error) return <div className="text-red-500">{error}</div>;
+  if (isLoading) return <div>Loading player...</div>;
 
   return (
     <div className="flex items-center gap-4 p-4 border rounded-2xl bg-card shadow-sm">
@@ -218,7 +263,7 @@ export default function MusicPlayer({
           >
             {isPlaying ? <Pause /> : <Play />}
           </Button>
-          <Button size="icon" variant="outline" onClick={onSkip}>
+          <Button size="icon" variant="outline" onClick={handleSkip}>
             <SkipForward />
           </Button>
           <span className="text-xs text-muted-foreground">
