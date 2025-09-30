@@ -106,6 +106,7 @@ export default function MusicPlayer({
     const handleEnded = async () => {
       setTimeout(async () => {
         if (onSkip) await onSkip();
+        window.location.reload(); 
       }, 200); 
     };
 
