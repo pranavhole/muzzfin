@@ -111,7 +111,7 @@ Cloudflare R2 account (optional for HLS storage)
 Run Locally
 
 # Clone repo
-git clone https://github.com/yourusername/muzzy.git
+git clone https://github.com/pranavhole/muzzfin.git
 cd muzzy
 
 # Install dependencies
