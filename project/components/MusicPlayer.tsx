@@ -59,7 +59,7 @@ export default function MusicPlayer({
     const poll = async () => {
       try {
         const res = await axios.get(
-          `${process.env.NEXT_PUBLIC_BACKEND_URL}api/v1/play/ready/${currentSong.id}`
+          `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1/play/ready/${currentSong.id}`
         );
         if (!active) return;
 
