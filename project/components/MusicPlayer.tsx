@@ -16,7 +16,7 @@ interface MusicPlayerProps {
   onPause?: () => void;
   onSkip?: () => Promise<any> | any;
   onSeek?: (time: number) => void;
-  host: boolean;
+  host: any;
 }
 
 export default function MusicPlayer({
@@ -29,82 +29,54 @@ export default function MusicPlayer({
   onSeek,
   host,
 }: MusicPlayerProps) {
-  const [currentSong, setCurrentSong] = useState<any>(null);
+  const currentSong = stream?.currentSong || null;
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isReady, setIsReady] = useState(false);
   const [id, setId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Local seek value for smooth slider drag
-  const [seekValue, setSeekValue] = useState<number>(0);
-  const seekTimeout = useRef<NodeJS.Timeout | null>(null);
-  const pollTimeout = useRef<NodeJS.Timeout | null>(null);
-  const attemptsRef = useRef<number>(0);
 
   const lastSeekEmit = useRef<number>(0);
-  const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+  const seekTimeout = useRef<NodeJS.Timeout | null>(null);
 
-  // Reset when stream changes
+  // reset when song changes
   useEffect(() => {
-    const song = stream?.currentSong || null;
-    setCurrentSong(song);
-    setSeekValue(0);
-
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
     }
-
     setIsLoading(true);
     setIsReady(false);
     setId(null);
     setDuration(0);
-    setError(null);
-    attemptsRef.current = 0;
+  }, [stream]);
 
-    if (pollTimeout.current) clearTimeout(pollTimeout.current);
-  }, [stream?.currentSong]);
-
-  // Poll backend until ready
+  // poll until backend marks song ready
   useEffect(() => {
     if (!currentSong) return;
-    if (!BACKEND) {
-      setError("Missing NEXT_PUBLIC_BACKEND_URL");
-      setIsLoading(false);
-      return;
-    }
 
     let active = true;
-    const MAX_ATTEMPTS = 20;
+    let pollTimeout: NodeJS.Timeout;
 
     const poll = async () => {
       try {
-        attemptsRef.current++;
         const res = await axios.get(
-          `${BACKEND}/api/v1/play/ready/${currentSong.id}`
+          `http://localhost:5000/api/v1/play/ready/${currentSong.id}`
         );
         if (!active) return;
 
-        if (res?.data?.ready && res?.data?.id) {
-          setId(res.data.id);
+        if (res.data.ready) {
           setIsReady(true);
           setIsLoading(false);
-          setError(null);
-          return;
+          setId(res.data.id);
+        } else {
+          pollTimeout = setTimeout(poll, 2000);
         }
-
-        if (attemptsRef.current >= MAX_ATTEMPTS) {
-          setError("Timed out waiting for backend to prepare the song.");
-          setIsLoading(false);
-          return;
-        }
-
-        pollTimeout.current = setTimeout(poll, 2000);
       } catch (err) {
-        console.error("[poll error]", err);
-        if (active) pollTimeout.current = setTimeout(poll, 4000);
+        console.error("Polling error:", err);
+        if (active) {
+          pollTimeout = setTimeout(poll, 4000);
+        }
       }
     };
 
@@ -112,32 +84,29 @@ export default function MusicPlayer({
 
     return () => {
       active = false;
-      if (pollTimeout.current) clearTimeout(pollTimeout.current);
+      clearTimeout(pollTimeout);
     };
-  }, [currentSong?.id, BACKEND]);
+  }, [currentSong]);
 
   const audioUrl =
-    isReady && currentSong && id
-      ? `${BACKEND}/api/v1/play/${id}/playlist.m3u8`
+    isReady && currentSong
+      ? `http://localhost:5000/api/v1/play/${id}/playlist.m3u8`
       : null;
 
-  const handleSkip = async () => {
-    if (onSkip) await onSkip();
-  };
-
-  // Setup HLS + audio
+  // setup HLS
   useEffect(() => {
     if (!audioUrl || !audioRef.current) return;
+
     const audio = audioRef.current;
     let hls: Hls | null = null;
 
     const handleLoadedMetadata = () => {
       const dur = audio.duration;
-      if (isFinite(dur) && dur > 0) {
-        setDuration(dur);
-      } else if (currentSong?.duration) {
-        setDuration(currentSong.duration);
-      }
+      setDuration(isFinite(dur) && dur > 0 ? dur : currentSong?.duration || 0);
+    };
+
+    const handleEnded = async () => {
+      if (onSkip) await onSkip();
     };
 
     const handleTimeUpdate = () => {
@@ -146,11 +115,10 @@ export default function MusicPlayer({
         lastSeekEmit.current = now;
         onSeek?.(audio.currentTime);
       }
-      setSeekValue(audio.currentTime);
     };
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
-    audio.addEventListener("ended", handleSkip);
+    audio.addEventListener("ended", handleEnded);
     audio.addEventListener("timeupdate", handleTimeUpdate);
 
     if (Hls.isSupported()) {
@@ -168,13 +136,6 @@ export default function MusicPlayer({
 
       hls.on(Hls.Events.ERROR, (_, data) => {
         console.error("[HLS Error]", data);
-        if (data?.fatal) {
-          setError("Playback error (HLS). Check console for details.");
-          setIsLoading(false);
-          try {
-            hls?.destroy();
-          } catch {}
-        }
       });
     } else if (audio.canPlayType("application/vnd.apple.mpegurl")) {
       audio.src = audioUrl;
@@ -182,27 +143,35 @@ export default function MusicPlayer({
 
     return () => {
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      audio.removeEventListener("ended", handleSkip);
+      audio.removeEventListener("ended", handleEnded);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       if (hls) hls.destroy();
     };
   }, [audioUrl, currentSong]);
 
-  // Play/pause sync
+  // sync play/pause
   useEffect(() => {
     if (!audioRef.current) return;
     if (isPlaying) {
-      audioRef.current.play().catch(console.error);
+      audioRef.current
+        .play()
+        .catch((err) => console.warn("[Autoplay blocked]", err));
     } else {
       audioRef.current.pause();
     }
   }, [isPlaying]);
 
-  // Slider drag
+  // sync seek
+  useEffect(() => {
+    if (!audioRef.current) return;
+    if (Math.abs(audioRef.current.currentTime - currentTime) > 1) {
+      audioRef.current.currentTime = currentTime;
+    }
+  }, [currentTime]);
+
+  // handle manual slider seek with debounce
   const handleSeek = (value: number[]) => {
     const time = value[0];
-    setSeekValue(time);
-
     if (audioRef.current) audioRef.current.currentTime = time;
 
     if (seekTimeout.current) clearTimeout(seekTimeout.current);
@@ -216,9 +185,8 @@ export default function MusicPlayer({
     onPlay?.();
   };
 
-  if (!currentSong) return <div>No song selected</div>;
-  if (error) return <div className="text-red-500">{error}</div>;
   if (isLoading) return <div>Loading player...</div>;
+  if (!currentSong) return <div>No song selected</div>;
 
   return (
     <div className="flex items-center gap-4 p-4 border rounded-2xl bg-card shadow-sm">
@@ -235,7 +203,7 @@ export default function MusicPlayer({
       <div className="flex-1">
         <h4 className="font-semibold">{currentSong.title}</h4>
         <Slider
-          value={[seekValue]}
+          value={[currentTime]}
           max={duration}
           step={1}
           className="mt-2"
@@ -249,13 +217,11 @@ export default function MusicPlayer({
           >
             {isPlaying ? <Pause /> : <Play />}
           </Button>
-          {host && (
-            <Button size="icon" variant="outline" onClick={handleSkip}>
-              <SkipForward />
-            </Button>
-          )}
+          <Button size="icon" variant="outline" onClick={onSkip}>
+            <SkipForward />
+          </Button>
           <span className="text-xs text-muted-foreground">
-            {Math.floor(seekValue)}s / {Math.floor(duration)}s
+            {Math.floor(currentTime)}s / {Math.floor(duration)}s
           </span>
         </div>
       </div>
