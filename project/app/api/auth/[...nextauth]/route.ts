@@ -45,41 +45,60 @@ const authOptions: NextAuthOptions = {
     // ---- JWT callback: store DB id + backend token ----
     async jwt({ token, account, user }) {
       if (account && user) {
-        try {
-          let backendUser;
-
-          // 1️⃣ Try GET /users/:email
+        const maxRetries = 2;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
           try {
-            const getRes = await axios.get(`${SERVER_URL}/api/v1/users/${user.email}`);
-            backendUser = getRes.data.user;
-          } catch (getErr: any) {
-            if (getErr.response?.status !== 404) {
-              console.error("❌ GET /users failed:", getErr.message);
+            let backendUser;
+
+            // 1️⃣ Try GET /users/:email
+            try {
+              const getRes = await axios.get(
+                `${SERVER_URL}/api/v1/users/${encodeURIComponent(user.email ?? "")}`,
+                { timeout: 8000 }
+              );
+              if (getRes.status === 200 && getRes.data?.user?.id) {
+                backendUser = getRes.data.user;
+              }
+            } catch (getErr: any) {
+              // 404 = user doesn't exist yet, anything else is unexpected
+              if (getErr.response?.status !== 404) {
+                console.warn(`⚠️ GET /users attempt ${attempt} failed:`, getErr.message);
+              }
+            }
+
+            // 2️⃣ If user not found, register via POST /users (upsert)
+            if (!backendUser) {
+              console.log("📝 Registering new user:", user.email);
+              const postRes = await axios.post(
+                `${SERVER_URL}/api/v1/users`,
+                {
+                  name: user.name ?? "",
+                  email: user.email ?? "",
+                  image: user.image ?? "",
+                },
+                { timeout: 8000 }
+              );
+              backendUser = postRes.data?.user;
+            }
+
+            // Store id and backend token in JWT
+            if (backendUser?.id) {
+              token.id = backendUser.id;
+              token.token = backendUser.token ?? token.token;
+              break; // success — exit retry loop
+            } else {
+              console.warn(`⚠️ Backend returned no user id (attempt ${attempt})`);
+            }
+          } catch (err: any) {
+            console.error(`❌ Backend sync attempt ${attempt}/${maxRetries} failed:`, {
+              message: err.message,
+              status: err.response?.status,
+              data: err.response?.data,
+            });
+            if (attempt < maxRetries) {
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
             }
           }
-
-          // 2️⃣ If GET fails or user not found, POST /users
-          if (!backendUser) {
-            const postRes = await axios.post(`${SERVER_URL}/api/v1/users`, {
-              name: user.name ?? "",
-              email: user.email ?? "",
-              image: user.image ?? "",
-              lastSeen: new Date().toISOString(),
-            });
-            backendUser = postRes.data.user;
-          }
-
-          // Store id and backend token in JWT
-          if (backendUser?.id) {
-            token.id = backendUser.id;
-            token.token = backendUser.token ?? token.token;
-          }
-        } catch (err: any) {
-          console.error("❌ Backend sync failed:", {
-            message: err.message,
-            status: err.response?.status,
-            data: err.response?.data,
-          });
         }
       }
       return token;

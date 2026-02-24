@@ -98,7 +98,7 @@ router.route("/:email").get(async (req: Request<{ email: string }>, res: Respons
       where: { email },
     });
     if (!user) {
-      res.status(201).json({ error: "User not found" });
+      res.status(404).json({ error: "User not found" });
       return;
     }
     res.status(200).json({ user });
