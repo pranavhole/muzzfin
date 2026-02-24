@@ -72,6 +72,19 @@ export function SongQueue({ songs, onVote, onRemove, className }: SongQueueProps
                 <p className="text-xs text-muted-foreground truncate">
                   {song.artist} • {formatDistanceToNow(new Date(song.addedAt), { addSuffix: true })}
                 </p>
+                {typeof (song as any).progressPercent === "number" && (
+                  <div className="mt-2">
+                    <div className="h-1.5 rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.min((song as any).progressPercent, 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] text-muted-foreground">
+                      {(song as any).progressStage ?? "processing"} • {(song as any).progressPercent ?? 0}%
+                    </span>
+                  </div>
+                )}
               </div>
               
               {onRemove && user && user.id === song.addedBy && (

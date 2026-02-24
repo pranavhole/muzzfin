@@ -14,13 +14,17 @@ export function useStreamPlayback(
   const [stream, setStream] = useState<Stream | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [joined, setJoined] = useState(false);
+  const [progress, setProgress] = useState<Record<string, { stage: string; percent: number }>>({});
   const socket = useRef<Socket | null>(null);
   const lastSeekEmit = useRef<number>(0);
   const isJoined = useRef(false);
+  const joinedResolvers = useRef<Array<() => void>>([]);
 
   // === Fetch stream data ===
   useEffect(() => {
-    if (!userId || stream) return;
+    if (!userId) return;
 
     const fetchStream = async () => {
       try {
@@ -35,12 +39,12 @@ export function useStreamPlayback(
     };
 
     fetchStream();
-  }, [streamId, userId, stream]);
+  }, [streamId, userId]);
 
   // === Initialize socket ===
+  // NOTE: NO stream/isHost in deps — socket must not reconnect on stream state updates
   useEffect(() => {
-    if (!userId || !stream) return;
-    if (socket.current) return;
+    if (!userId || !streamId) return;
 
     const s = io(`${process.env.NEXT_PUBLIC_BACKEND_URL}`, {
       transports: ["websocket"],
@@ -49,14 +53,41 @@ export function useStreamPlayback(
 
     socket.current = s;
 
+    const doJoin = () => {
+      s.emit(
+        "message",
+        { action: "join_stream", payload: { streamId, userId, role: isHost ? "host" : "viewer" } },
+        (response: any) => {
+          if (response?.error) {
+            console.error("Join stream failed:", response.error);
+          } else {
+            console.log("✅ Joined stream");
+            isJoined.current = true;
+            setJoined(true);
+            joinedResolvers.current.forEach((r) => r());
+            joinedResolvers.current = [];
+          }
+        }
+      );
+    };
+
     s.on("connect", () => {
       console.log("✅ Socket connected:", s.id);
+      setSocketConnected(true);
+      isJoined.current = false; // reset before re-joining
+      doJoin();
+    });
 
-      // join stream after connected
-      s.emit("message", {
-        action: "join_stream",
-        payload: { streamId, userId, role: isHost ? "host" : "viewer" },
-      });
+    s.on("disconnect", () => {
+      console.warn("❌ Socket disconnected");
+      setSocketConnected(false);
+      isJoined.current = false;
+      setJoined(false);
+    });
+
+    s.on("connect_error", (err) => {
+      console.error("Socket connection error:", err);
+      setSocketConnected(false);
     });
 
     const handleMessage = (msg: any) => {
@@ -71,11 +102,17 @@ export function useStreamPlayback(
         case "pause":
           setIsPlaying(false);
           break;
-        case "seek":
-          setCurrentTime(payload.currentTime ?? payload.position ?? 0);
-          if (audioRef.current)
-            audioRef.current.currentTime = payload.currentTime ?? payload.position ?? 0;
+        case "seek": {
+          const target = payload.currentTime ?? payload.position ?? 0;
+          if (audioRef.current) {
+            const diff = Math.abs(audioRef.current.currentTime - target);
+            if (diff > 0.75) {
+              audioRef.current.currentTime = target;
+              setCurrentTime(target);
+            }
+          }
           break;
+        }
         case "sync":
           setIsPlaying(payload.isPlaying);
           setCurrentTime(payload.currentTime);
@@ -96,10 +133,33 @@ export function useStreamPlayback(
         case "viewer_count":
           setStream((prev) => (prev ? { ...prev, listeners: payload.count } : prev));
           break;
+        case "download_progress": {
+          const { url, stage, percent } = payload;
+          setProgress((p) => ({ ...p, [url]: { stage, percent } }));
+          setStream((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  queue: prev.queue.map((q) =>
+                    q.url === url ? { ...q, progressStage: stage, progressPercent: percent } : q
+                  ),
+                  currentSong:
+                    prev.currentSong && prev.currentSong.url === url
+                      ? { ...prev.currentSong, progressStage: stage, progressPercent: percent }
+                      : prev.currentSong,
+                }
+              : prev
+          );
+          break;
+        }
         case "playback_state":
           setIsPlaying(payload.isPlaying);
           setCurrentTime(payload.currentTime);
           isJoined.current = true;
+          setJoined(true);
+          joinedResolvers.current.forEach((r) => r());
+          joinedResolvers.current = [];
+          console.log("✅ Playback state received, stream joined");
           break;
       }
     };
@@ -108,16 +168,19 @@ export function useStreamPlayback(
 
     return () => {
       s.off("message", handleMessage);
+      s.off("connect");
+      s.off("disconnect");
+      s.off("connect_error");
       s.disconnect();
+      socket.current = null;
+      isJoined.current = false;
     };
-  }, [stream, userId, isHost, streamId, audioRef]);
+  }, [userId, streamId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // === Audio sync ===
+  // === Audio time tracking (play/pause controlled by MusicPlayer) ===
   useEffect(() => {
     if (!audioRef.current) return;
     const audio = audioRef.current;
-    if (isPlaying) audio.play().catch(console.error);
-    else audio.pause();
 
     const handleTimeUpdate = () => {
       const now = Date.now();
@@ -129,31 +192,72 @@ export function useStreamPlayback(
 
     audio.addEventListener("timeupdate", handleTimeUpdate);
     return () => audio.removeEventListener("timeupdate", handleTimeUpdate);
-  }, [isPlaying, audioRef]);
+  }, [audioRef]);
 
-  // === Helper to emit socket messages safely ===
-  const sendSocket = (action: string, payload: any = {}) => {
-    if (!socket.current?.connected) {
-      console.warn("Socket not connected yet");
-      return;
+  // === Helper to emit socket messages with response ===
+  const sendSocket = async (action: string, payload: any = {}): Promise<any> => {
+    const s = socket.current;
+    if (!s) {
+      const error = "❌ Socket not initialized";
+      console.error(error);
+      throw new Error(error);
     }
+
+    if (!s.connected) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("❌ Socket not connected. Waiting for connection...")), 5000);
+        s.once("connect", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        // Ensure a reconnect attempt is in flight
+        s.connect();
+      });
+    }
+
     if (!isJoined.current && action !== "join_stream") {
-      console.warn("Stream not joined yet, cannot emit", action);
-      return;
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("⚠️ Timed out waiting to join stream")), 8000);
+        joinedResolvers.current.push(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
     }
-    socket.current.emit("message", { action, payload });
+
+    console.log(`📤 Sending ${action}:`, payload);
+
+    return await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`⏱️ Timeout waiting for ${action} response`)), 10000);
+
+      s.emit("message", { action, payload }, (response: any) => {
+        clearTimeout(timeout);
+        if (response?.error) {
+          console.error(`❌ ${action} error:`, response.error);
+          reject(new Error(response.error));
+        } else {
+          console.log(`✅ ${action} response:`, response);
+          resolve(response);
+        }
+      });
+    });
   };
 
   // === Playback controls ===
-  const play = () => sendSocket("play", { streamId });
-  const pause = () => sendSocket("pause", { streamId });
-  const seek = (time: number) => sendSocket("seek", { position: time });
-  const skip = () => isHost && sendSocket("skip_song", { streamId, userId });
+  const ensureHost = () => {
+    if (!isHost) return Promise.reject(new Error("Only host can control playback"));
+    return Promise.resolve();
+  };
+
+  const play = () => ensureHost().then(() => sendSocket("play", { streamId }));
+  const pause = () => ensureHost().then(() => sendSocket("pause", { streamId }));
+  const seek = (time: number) => ensureHost().then(() => sendSocket("seek", { position: time }));
+  const skip = () => ensureHost().then(() => sendSocket("skip_song", { streamId, userId }));
 
   // === Queue actions ===
   const addSong = (url: string) => sendSocket("add_song", { url, streamId, userId });
   const voteSong = (songId: string) => sendSocket("vote_song", { songId, userId });
   const removeSong = (songId: string) => sendSocket("remove_song", { songId, streamId });
 
-  return { stream, isPlaying, currentTime, play, pause, seek, skip, addSong, voteSong, removeSong };
+  return { stream, isPlaying, currentTime, socketConnected, joined, play, pause, seek, skip, addSong, voteSong, removeSong };
 }

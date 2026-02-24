@@ -11,7 +11,7 @@ import axios from "axios";
 dotenv.config();
 
 const redisUrl =
-  "redis://default:xxXaPbgzkRHgmAxkhwmfJkbkkXylbLth@caboose.proxy.rlwy.net:31117";
+  "redis://default:LclaDGalRJYdDKopJzYbdYWwTltgutwx@gondola.proxy.rlwy.net:24161";
 
 if (!redisUrl) throw new Error("❌ Missing REDIS_URL env variable");
 
@@ -68,8 +68,14 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
     redisPub.publish(`stream:${streamId}`, JSON.stringify(message));
   }
 
-  // Redis cross-instance sync
+  // Redis cross-instance sync (stream messages)
   redisSub.pSubscribe("stream:*", (msg: any, channel: any) => {
+    const streamId = channel.split(":")[1];
+    io.to(streamId).emit("message", JSON.parse(msg));
+  });
+
+  // Download progress fanout
+  redisSub.pSubscribe("progress:*", (msg: any, channel: any) => {
     const streamId = channel.split(":")[1];
     io.to(streamId).emit("message", JSON.parse(msg));
   });
@@ -77,7 +83,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
   io.on("connection", (socket: Socket) => {
     let joinedStreamId: string | null = null;
 
-    socket.on("message", async ({ action, payload }: any) => {
+    socket.on("message", async ({ action, payload }: any, ack?: (response: any) => void) => {
       try {
         switch (action) {
           case "join_stream": {
@@ -85,7 +91,7 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             joinedStreamId = streamId;
 
             if (!streamId || !userId) {
-              socket.emit("message", { error: "❌ Missing streamId or userId" });
+              ack?.({ error: "❌ Missing streamId or userId" });
               return;
             }
 
@@ -108,11 +114,19 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
               action: "viewer_count",
               payload: { count: streamClients.get(streamId)!.size },
             });
+            ack?.({ success: true });
             break;
           }
 
           case "play": {
-            if (!joinedStreamId) return;
+            if ((socket as any).data?.role !== "host") {
+              ack?.({ error: "Only host can control playback" });
+              return;
+            }
+            if (!joinedStreamId) {
+              ack?.({ error: "Not in a stream" });
+              return;
+            }
             let state = await getPlaybackState(joinedStreamId);
             if (!state) state = { isPlaying: false, currentTime: 0, lastUpdate: Date.now() };
 
@@ -121,11 +135,19 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             await setPlaybackState(joinedStreamId, state);
 
             broadcastToStream(joinedStreamId, { action: "play" });
+            ack?.({ success: true });
             break;
           }
 
           case "pause": {
-            if (!joinedStreamId) return;
+            if ((socket as any).data?.role !== "host") {
+              ack?.({ error: "Only host can control playback" });
+              return;
+            }
+            if (!joinedStreamId) {
+              ack?.({ error: "Not in a stream" });
+              return;
+            }
             let state = await getPlaybackState(joinedStreamId);
             if (!state) return;
 
@@ -138,14 +160,22 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
             await setPlaybackState(joinedStreamId, state);
 
             broadcastToStream(joinedStreamId, { action: "pause" });
+            ack?.({ success: true });
             break;
           }
 
           case "seek": {
-            if (!joinedStreamId) return;
+            if ((socket as any).data?.role !== "host") {
+              ack?.({ error: "Only host can control playback" });
+              return;
+            }
+            if (!joinedStreamId) {
+              ack?.({ error: "Not in a stream" });
+              return;
+            }
             const { position } = payload;
             if (typeof position !== "number" || position < 0) {
-              socket.emit("message", { error: "⚠️ Invalid seek time" });
+              ack?.({ error: "⚠️ Invalid seek time" });
               return;
             }
 
@@ -160,27 +190,28 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
               action: "seek",
               payload: { currentTime: position },
             });
+            ack?.({ success: true });
             break;
           }
 
           case "add_song": {
             const { url, streamId, userId } = payload;
             if (!url || !streamId || !userId) {
-              socket.emit("message", { error: "⚠️ Missing url, streamId, or userId" });
+              ack?.({ error: "⚠️ Missing url, streamId, or userId" });
               return;
             }
 
             try {
               const checkSong = await prisma.song.findFirst({ where: { url, streamId } });
               if (checkSong) {
-                socket.emit("message", { error: "⚠️ Song already exists in this stream" });
+                ack?.({ error: "⚠️ Song already exists in this stream" });
                 return;
               }
 
               const downloadedSong = await prisma.downloadedSong.findUnique({ where: { url } });
               const videoId = getYouTubeVideoId(url);
               if (!videoId) {
-                socket.emit("message", { error: "⚠️ Invalid YouTube URL" });
+                ack?.({ error: "⚠️ Invalid YouTube URL" });
                 return;
               }
               const metadata = await getYouTubeMetadata(videoId);
@@ -217,47 +248,52 @@ export function createSocketServer(server: any, prisma: PrismaClient) {
                   });
                 }
 
-                return { newSong, updatedQueue: updatedStream.queue };
+                return { newSong, updatedQueue: updatedStream.queue, updatedStream };
               });
 
               await redisPub.rPush(`queue:${streamId}`, JSON.stringify(result.newSong));
 
               if (!downloadedSong) {
                 try {
+                  console.log(`📥 Triggering download for: ${url}`);
                   await axios.post(`${process.env.BACKEND_URL}/`, { hostId: streamId, url });
                 } catch (err: any) {
                   console.error("⚠️ Failed to trigger download job:", err.message);
-                  socket.emit("message", { error: "Failed to trigger download job" });
                 }
               }
 
-              socket.emit("message", { action: "song_added", data: result });
+              console.log(`✅ Song added: ${metadata.title}`);
+              ack?.({ success: true, data: result });
               broadcastToStream(streamId, { action: "song_added_broadcast", data: result });
             } catch (error) {
               console.error("❌ Error creating song:", error);
-              socket.emit("message", { error: "Failed to create song" });
+              ack?.({ error: "Failed to create song" });
             }
             break;
           }
 
           case "vote_song":
-            await voteSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg));
+            await voteSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg), ack);
             break;
 
           case "remove_song":
-            await removeSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg));
+            await removeSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg), ack);
             break;
 
           case "skip_song":
-            await skipSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg));
+            if ((socket as any).data?.role !== "host") {
+              ack?.({ error: "Only host can control playback" });
+              return;
+            }
+            await skipSongHandler(socket, payload, prisma, (msg) => broadcastToStream(joinedStreamId!, msg), ack);
             break;
 
           default:
-            socket.emit("message", { error: "❌ Unknown action" });
+            ack?.({ error: "❌ Unknown action" });
         }
       } catch (err) {
         console.error("Socket error:", err);
-        socket.emit("message", { error: "❌ Internal server error" });
+        ack?.({ error: "❌ Internal server error" });
       }
     });
 

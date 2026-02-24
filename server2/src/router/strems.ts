@@ -36,6 +36,24 @@ router.route("/").get(async (req: Request, res: Response) => {
         return;
       }
 
+      // Check if user exists before trying to connect
+      const user = await prisma.user.findUnique({
+        where: { id: userId as string },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      // Check if stream exists before trying to update
+      const stream = await prisma.stream.findUnique({
+        where: { id: streamId as string },
+      });
+      if (!stream) {
+        res.status(404).json({ error: "Stream not found" });
+        return;
+      }
+
       const updatedStream = await prisma.stream.update({
         where: { id: streamId as string },
         data: {

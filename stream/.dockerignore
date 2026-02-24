@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+
+# Local download artifacts
+src/downloads/
+downloads/
+src/abc/
+loudnorm

@@ -71,6 +71,7 @@ export default function StreamContent() {
             <CardContent>
               <MusicPlayer
                 stream={stream}
+                audioRef={audioRef}
                 isPlaying={isPlaying}
                 currentTime={currentTime}
                 onPlay={play}

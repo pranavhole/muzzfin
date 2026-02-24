@@ -23,7 +23,7 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>;
 
 interface AddSongFormProps {
-  onAddSong: (url: string) => any;
+  onAddSong: (url: string) => Promise<any>;
   className?: string;
 }
 
@@ -36,6 +36,7 @@ export function AddSongForm({ onAddSong, className }: AddSongFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -76,23 +77,40 @@ export function AddSongForm({ onAddSong, className }: AddSongFormProps) {
   }, [watchUrl]);
 
   const onSubmit = async (values: FormValues) => {
+    setStatusMessage(null);
     setIsSubmitting(true);
     try {
-      if (isDirectUrl(values.url)) {
-        await onAddSong(values.url);
-        form.reset();
+      if (!isDirectUrl(values.url)) {
+        setStatusMessage({ type: "error", text: "❌ Please paste a direct YouTube, SoundCloud, or Spotify URL" });
+        setIsSubmitting(false);
+        return;
       }
+      console.log("📤 Sending song:", values.url);
+      await onAddSong(values.url);
+      setStatusMessage({ type: "success", text: "✅ Song added to queue!" });
+      form.reset();
+      setSuggestions([]);
+    } catch (error: any) {
+      const errorMsg = error?.message || "Failed to add song";
+      console.error("Failed to add song:", error);
+      setStatusMessage({ type: "error", text: `❌ ${errorMsg}` });
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleSuggestionClick = async (suggestion: Suggestion) => {
+    setStatusMessage(null);
     setIsSubmitting(true);
     try {
       await onAddSong(suggestion.url);
+      setStatusMessage({ type: "success", text: "✅ Song added to queue!" });
       form.reset();
       setSuggestions([]);
+    } catch (error: any) {
+      const errorMsg = error?.message || "Failed to add song";
+      console.error("Failed to add song:", error);
+      setStatusMessage({ type: "error", text: `❌ ${errorMsg}` });
     } finally {
       setIsSubmitting(false);
     }
@@ -100,9 +118,14 @@ export function AddSongForm({ onAddSong, className }: AddSongFormProps) {
 
   return (
     <div className={className}>
+      {statusMessage && (
+        <div className={`p-2 rounded-md mb-2 text-sm ${statusMessage.type === "success" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+          {statusMessage.text}
+        </div>
+      )}
       <Form {...form}>
         <form
-          onSubmit={form.handleSubmit(onSubmit)} // ✅ no reload (react-hook-form handles preventDefault)
+          onSubmit={form.handleSubmit(onSubmit)}
           className="flex items-start gap-2"
         >
           <div className="flex-1">

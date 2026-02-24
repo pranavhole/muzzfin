@@ -18,8 +18,8 @@ model User {
   votedSongs     Song[]       @relation("SongVotes")
   lastSeen       DateTime     @default(now())
   createdAt      DateTime     @default(now())
-  followers      Followers[]  @relation("UserFollowers")
-  following      Followers[]  @relation("UserFollowing")
+  followers      Follow[]     @relation("userFollowers")
+  following      Follow[]     @relation("userFollowing")
 }
 
 model Playlist {
@@ -30,15 +30,15 @@ model Playlist {
   updatedAt DateTime @updatedAt
 }
 
-model Followers {
-  id         String   @id @default(cuid())
-  name       String
-  email      String   @unique
-  image      String
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  followers  User[]   @relation("UserFollowers")
-  following  User[]   @relation("UserFollowing")
+model Follow {
+  id          String   @id @default(cuid())
+  follower    User     @relation("userFollowing", fields: [followerId], references: [id])
+  followerId  String
+  following   User     @relation("userFollowers", fields: [followingId], references: [id])
+  followingId String
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
 }
 model Song {
   id          String     @id @default(cuid())

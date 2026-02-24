@@ -7,12 +7,13 @@ export async function skipSongHandler(
   ws: Socket,
   payload: any,
   prisma: PrismaClient,
-  broadcast: (data: string) => void
+  broadcast: (data: any) => void,
+  ack?: (response: any) => void
 ) {
   try {
     const { streamId } = payload;
     if (!streamId) {
-      ws.emit("message", { error: "⚠️ Missing streamId" });
+      ack?.({ error: "⚠️ Missing streamId" });
       return;
     }
 
@@ -27,7 +28,7 @@ export async function skipSongHandler(
     });
 
     if (!stream) {
-      ws.emit("message", { error: "Stream not found" });
+      ack?.({ error: "Stream not found" });
       return;
     }
 
@@ -52,19 +53,14 @@ export async function skipSongHandler(
     });
     const queue = updatedStream?.queue || [];
 
-    ws.emit("message", {
-      action: "song_skipped",
-      data: { nextSong, updatedStream:updatedStream },
-    });
+    ack?.({ success: true, data: { nextSong, updatedStream } });
 
-    broadcast(
-      JSON.stringify({
-        action: "song_skipped_broadcast",
-        data: { nextSong ,updatedStream:updatedStream },
-      })
-    );
+    broadcast({
+      action: "song_skipped_broadcast",
+      data: { nextSong, updatedStream },
+    });
   } catch (error) {
     console.error("skipSongHandler error:", error);
-    ws.emit("message", { error: "Failed to skip song" });
+    ack?.({ error: "Failed to skip song" });
   }
 }

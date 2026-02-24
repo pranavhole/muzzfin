@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
+import crypto from "crypto";
 import { Worker, Queue } from "bullmq";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
@@ -8,7 +10,7 @@ import { spawn } from "child_process";
 import axios from "axios";
 import pLimit from "p-limit";
 import IORedis from "ioredis";
-import ytDlp from "yt-dlp-exec";
+// yt-dlp-exec no longer used — calling yt-dlp directly via spawn
 
 dotenv.config();
 
@@ -54,13 +56,31 @@ const worker = new Worker(
   async (job) => {
     console.log(`🛠️ Worker picked job ${job.id} with data:`, job.data);
 
-    const { url } = job.data;
+    const { url, streamId } = job.data;
     console.log(`🎶 Download job started: ${url}`);
 
+    const emitProgress = (stage, percent) => {
+      if (!streamId) return;
+      try {
+        redisConnection.publish(
+          `progress:${streamId}`,
+          JSON.stringify({ action: "download_progress", payload: { url, stage, percent } })
+        );
+      } catch (e) {
+        console.warn("⚠️ Progress publish failed", e.message);
+      }
+    };
+
     // Already processed?
+    const apiBase = process.env.API_URL?.startsWith("http")
+      ? process.env.API_URL
+      : process.env.API_URL
+      ? `https://${process.env.API_URL}`
+      : "";
+
     try {
       console.log("🔍 Checking API for existing record...");
-      const song = await axios.get(process.env.API_URL, { params: { url } });
+      const song = await axios.get(apiBase, { params: { url } });
       if (song.data?.path) {
         console.log("✅ Already exists, skipping.");
         return { url: song.data.songId };
@@ -71,27 +91,67 @@ const worker = new Worker(
 
     // Paths
     const uuid = uuidv4();
-    const basePath = path.join("/tmp", uuid);
+    const tmpRoot = process.env.TMP_DIR || os.tmpdir();
+    const basePath = path.join(tmpRoot, uuid);
     console.log(`📂 Creating temp folder: ${basePath}`);
     fs.mkdirSync(basePath, { recursive: true });
-    const tempFile = path.join(basePath, "audio.webm");
+    if (!fs.existsSync(basePath)) throw new Error(`Temp folder missing: ${basePath}`);
+    const tempFilePattern = path.join(basePath, "audio.%(ext)s");
+    emitProgress("queued", 0);
 
-    // yt-dlp download (no re-encode)
-    const ytArgs = {
-      format: "bestaudio/best",
-      output: tempFile,
-      noPlaylist: true,
-      verbose: true,
-    };
+    // yt-dlp download (no re-encode) — using spawn for full CLI control
+    const cookiesFile = path.resolve("/app/src/cookies.txt");
+    const hasCookies = fs.existsSync(cookiesFile) && fs.statSync(cookiesFile).size > 100;
 
-    console.log("▶️ Running yt-dlp with args:", ytArgs);
-    try {
-      await ytDlp(url, ytArgs);
-      console.log("✅ yt-dlp finished successfully");
-    } catch (err) {
-      console.error("❌ yt-dlp failed with error:", err);
-      throw err;
+    const ytDlpBin = "/usr/bin/yt-dlp";
+    const ytDlpArgs = [
+      url,
+      "--format", "bestaudio",
+      "--output", tempFilePattern,
+      "--no-playlist",
+      "--prefer-free-formats",
+      "--js-runtimes", "nodejs",
+      ...(hasCookies ? ["--cookies", cookiesFile] : []),
+    ];
+    console.log(`🍪 Cookies: ${hasCookies ? "loaded" : "not found, proceeding without"}`);
+    console.log("▶️ Running yt-dlp:", ytDlpBin, ytDlpArgs.join(" "));
+
+    const runYtDlp = () =>
+      new Promise((resolve, reject) => {
+        const proc = spawn(ytDlpBin, ytDlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "", stderr = "";
+        proc.stdout.on("data", (d) => { stdout += d; });
+        proc.stderr.on("data", (d) => { stderr += d; });
+        proc.on("error", reject);
+        proc.on("close", (code) => {
+          if (code === 0) return resolve(stdout);
+          const err = new Error(`yt-dlp exited with code ${code}`);
+          err.stderr = stderr.trim();
+          err.stdout = stdout.trim();
+          reject(err);
+        });
+      });
+
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        emitProgress("downloading", 10);
+        await runYtDlp();
+        console.log("✅ yt-dlp finished successfully");
+        break;
+      } catch (err) {
+        console.error(`❌ yt-dlp attempt ${attempt}/${maxRetries} failed:`, err.stderr || err.message);
+        if (attempt === maxRetries) throw err;
+        console.log(`⏳ Retrying in ${attempt * 2}s...`);
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+      }
     }
+
+    const downloadedFiles = fs.readdirSync(basePath);
+    const audioFile = downloadedFiles.find((f) => f.startsWith("audio."));
+    if (!audioFile) throw new Error("Downloaded file not found");
+    const fullAudioPath = path.join(basePath, audioFile);
+    emitProgress("downloaded", 50);
 
     // Convert to HLS with ffmpeg
     const playlistName = "playlist.m3u8";
@@ -101,7 +161,7 @@ const worker = new Worker(
         "ffmpeg",
         [
           "-y",
-          "-i", tempFile,
+          "-i", fullAudioPath,
           "-vn",
           "-c:a", "aac",
           "-b:a", "128k",
@@ -127,6 +187,7 @@ const worker = new Worker(
       });
     });
     console.log("✅ HLS ready");
+    emitProgress("converted", 70);
 
     // Upload files
     // Upload files
@@ -151,9 +212,11 @@ const worker = new Worker(
               ? "application/vnd.apple.mpegurl"
               : "video/mp2t",
           });
+          emitProgress("uploading", 70 + Math.floor((30 * filesToUpload.indexOf(file)) / filesToUpload.length));
         })
       )
     );
+    emitProgress("uploaded", 95);
 
     // Cleanup
     console.log("🧹 Cleaning up temp files...");
@@ -174,14 +237,15 @@ const worker = new Worker(
     // Playlist URL
     const playlistUrl = `${process.env.S3_BASE_URL}/${uuid}/${playlistName}`;
     console.log(`🔗 Playlist URL generated: ${playlistUrl}`);
+    emitProgress("ready", 100);
 
     // Save metadata
     try {
-      console.log("💾 Saving metadata to API...");
-      await axios.put(process.env.API_URL, { id: uuid, url });
-      console.log("✅ Metadata saved");
+      console.log("💾 Saving metadata to API...", apiBase, { id: uuid, url });
+      const resp = await axios.put(apiBase, { id: uuid, url });
+      console.log("✅ Metadata saved:", resp.data);
     } catch (err) {
-      console.error("⚠️ Metadata save failed:", err.message);
+      console.error("⚠️ Metadata save failed:", err.message, err.response?.data || "");
     }
 
     return { url: playlistUrl };
@@ -196,8 +260,17 @@ worker.on("failed", (job, err) => console.error(`❌ Job ${job.id} failed:`, err
 console.log("📦 Creating queue...");
 const songQueue = new Queue("song-downloads", { connection: redisConnection });
 
-export async function addSongDownloadJob(url) {
+export async function addSongDownloadJob(url, streamId) {
   console.log(`📥 Adding job for URL: ${url}`);
-  await songQueue.add("download-song", { url }, { removeOnComplete: true, removeOnFail: true });
+  const jobId = crypto.createHash("sha256").update(url).digest("hex").slice(0, 32);
+  await songQueue.add(
+    "download-song",
+    { url, streamId },
+    {
+      jobId, // hashed URL — BullMQ forbids ':' in custom IDs
+      removeOnComplete: true,
+      removeOnFail: true,
+    }
+  );
   console.log(`✅ Job successfully queued for: ${url}`);
 }

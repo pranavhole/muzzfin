@@ -86,8 +86,8 @@ router.route("/lastSeen").post(async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to update user" });
   }
 });
-router.route("/:email").get(async (req: Request, res: Response) => {
-  const { email } = req.params;
+router.route("/:email").get(async (req: Request<{ email: string }>, res: Response) => {
+  const email = req.params.email;
   if (!email) {
     res.status(400).json({ error: "Missing email in request params" });
     return;

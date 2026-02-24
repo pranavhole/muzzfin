@@ -5,12 +5,13 @@ export async function voteSongHandler(
   ws: Socket,
   payload: any,
   prisma: PrismaClient,
-  broadcastToStream: (joinedStreamId: string, msg: any) => void
+  broadcastToStream: (joinedStreamId: string, msg: any) => void,
+  ack?: (response: any) => void
 ) {
   const { songId, userId } = payload;
 
   if (!songId || !userId) {
-    ws.send(JSON.stringify({ error: "⚠️ Missing songId or userId" }));
+    ack?.({ error: "⚠️ Missing songId or userId" });
     return;
   }
 
@@ -21,20 +22,18 @@ export async function voteSongHandler(
     });
 
     if (!song) {
-      ws.send(JSON.stringify({ error: "Song not found" }));
+      ack?.({ error: "Song not found" });
       return;
     }
 
     if (song.addedById === userId) {
-      ws.send(
-        JSON.stringify({ error: "❌ You cannot vote for your own song" })
-      );
+      ack?.({ error: "❌ You cannot vote for your own song" });
       return;
     }
 
     const alreadyVoted = song.votedBy.some((voter) => voter.id === userId);
     if (alreadyVoted) {
-      ws.send(JSON.stringify({ error: "⚠️ You already voted for this song" }));
+      ack?.({ error: "⚠️ You already voted for this song" });
       return;
     }
     const updatedSong = await prisma.$transaction(async (tx) => {
@@ -56,7 +55,7 @@ export async function voteSongHandler(
       orderBy: [{ votedBy: { _count: "desc" } }, { addedAt: "asc" }],
     });
 
-    ws.send({ action: "song_voted", data: newQueue });
+    ack?.({ success: true, data: newQueue });
 
     broadcastToStream(id, {
       action: "song_voted_broadcast",
@@ -64,6 +63,6 @@ export async function voteSongHandler(
     });
   } catch (error) {
     console.error("❌ Error voting for song:", error);
-    ws.send(JSON.stringify({ error: "Failed to record vote" }));
+    ack?.({ error: "Failed to record vote" });
   }
 }
