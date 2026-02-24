@@ -106,39 +106,76 @@ const authOptions: NextAuthOptions = {
 
     // ---- Session callback: map JWT to Session, update lastSeen ----
     async session({ session, token }) {
-      const fallbackUser = {
-        id: "unknown",
-        name: session.user?.name ?? "Anonymous",
-        email: session.user?.email ?? "unknown@example.com",
-        image: session.user?.image ?? null,
-        lastSeen: new Date().toISOString(),
-        token: null,
-      };
+      const email = token.email ?? session.user?.email;
+
+      // If token.id is missing (backend was down during sign-in), try to recover
+      if (!token.id && email) {
+        console.warn("⚠️ token.id missing — attempting recovery for:", email);
+        try {
+          const getRes = await axios.get(
+            `${SERVER_URL}/api/v1/users/${encodeURIComponent(email)}`,
+            { timeout: 5000 }
+          );
+          if (getRes.status === 200 && getRes.data?.user?.id) {
+            token.id = getRes.data.user.id;
+            token.token = getRes.data.user.token ?? token.token;
+            console.log("✅ Recovered user id:", token.id);
+          }
+        } catch {
+          // GET failed — try registering
+          try {
+            const postRes = await axios.post(
+              `${SERVER_URL}/api/v1/users`,
+              {
+                name: session.user?.name ?? "",
+                email,
+                image: session.user?.image ?? "",
+              },
+              { timeout: 5000 }
+            );
+            if (postRes.data?.user?.id) {
+              token.id = postRes.data.user.id;
+              token.token = postRes.data.user.token ?? token.token;
+              console.log("✅ Registered & recovered user id:", token.id);
+            }
+          } catch (regErr: any) {
+            console.error("❌ Recovery registration failed:", regErr.message);
+          }
+        }
+      }
 
       if (!token.id) {
         console.warn("⚠️ No token.id found. Returning fallback session.");
-        return { ...session, user: fallbackUser };
+        return {
+          ...session,
+          user: {
+            id: "unknown",
+            name: session.user?.name ?? "Anonymous",
+            email: email ?? "unknown@example.com",
+            image: session.user?.image ?? null,
+            lastSeen: new Date().toISOString(),
+            token: null,
+          },
+        };
       }
 
-      // Optional: update lastSeen
-      try {
-        await axios.post(`${SERVER_URL}/api/v1/users/lastSeen`, {
+      // Optional: update lastSeen (fire-and-forget, don't block session)
+      axios
+        .post(`${SERVER_URL}/api/v1/users/lastSeen`, {
           id: token.id,
           lastSeen: new Date().toISOString(),
-        });
-      } catch (err) {
-        console.error("⚠️ Failed to update lastSeen:", err);
-      }
+        })
+        .catch(() => {});
 
       return {
         ...session,
         user: {
           id: token.id as string,
           name: session.user?.name ?? "Anonymous",
-          email: session.user?.email ?? "unknown@example.com",
+          email: email ?? "unknown@example.com",
           image: session.user?.image ?? null,
           lastSeen: new Date().toISOString(),
-          token: token.token ?? null,
+          token: (token.token as string) ?? null,
         },
       };
     },
