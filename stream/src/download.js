@@ -110,7 +110,7 @@ const worker = new Worker(
       "--output", tempFilePattern,
       "--no-playlist",
       "--prefer-free-formats",
-      "--js-runtimes", "nodejs",
+      "--js-runtimes", "node",
       ...(hasCookies ? ["--cookies", cookiesFile] : []),
     ];
     console.log(`🍪 Cookies: ${hasCookies ? "loaded" : "not found, proceeding without"}`);
